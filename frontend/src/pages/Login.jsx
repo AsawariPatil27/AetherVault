@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { signIn } from "../services/auth";
+import axios from "axios"; 
 
 function Login() {
   const [email, setEmail] = useState("");
@@ -17,9 +18,21 @@ function Login() {
     return;
   }
 
-  // ✅ CORRECT CHECK
   if (data?.session) {
-    navigate("/dashboard");
+    const token = data.session.access_token;  // 🔥 get JWT
+
+    // 🔥 CALL BACKEND
+    await axios.post(
+      "http://localhost:5000/user/sync",
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+
+    navigate("/dashboard"); // 👈 AFTER sync
   }
 };
   return (
