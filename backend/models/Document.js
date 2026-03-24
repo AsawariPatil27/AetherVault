@@ -14,7 +14,10 @@ const documentSchema = new mongoose.Schema({
 
   fileName: String,
 
-  fileUrl: String, // S3 URL
+  fileKey: {
+    type: String,
+    required: true,
+  },
 
   fileType: {
     type: String,

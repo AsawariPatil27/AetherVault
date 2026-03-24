@@ -6,6 +6,7 @@ import cors from "cors";
 import { connectDB } from "./database/mongoConnection.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
+import parseRoutes from "./routes/parseRoutes.js";
 
 const app = express();
 
@@ -18,6 +19,8 @@ connectDB();
 // ✅ ROUTES FIRST
 app.use("/upload", uploadRoutes);
 app.use("/user", userRoutes);
+app.use("/parse", parseRoutes);
+
 
 app.get("/", (req, res) => {
   res.send("Hello World!");

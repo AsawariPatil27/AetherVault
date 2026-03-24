@@ -1,29 +1,28 @@
-import {parsePDF} from "./pdfParser.js";
-import {parseImage} from "./imageParser.js";
-import {parseAudio} from "./audioParser.js";
-import {parseVideo} from "./videoParser.js";
+import { getSignedFileUrl } from "../../utils/s3SignedUrl.js";
+import { parsePdf } from "./pdfParser.js";
+import { parseImage } from "./imageParser.js";
+import { parseAudio } from "./audioParser.js";
+import { parseVideo } from "./videoParser.js";
 
-export const parseFile = async(fileUrl, fileType) =>
-{
-    if(fileType === "pdf")
-    {
-        return await parsePDF(fileUrl);
-    }
+export const parseFile = async (fileKey, fileType) => {
 
-    if(fileType === "image")
-    {
-        return await parseImage(fileUrl);
-    }
+  const signedUrl = await getSignedFileUrl(fileKey);
 
-    if(fileType === "audio")
-    {
-        return await parseAudio(fileUrl);
-    }
+  if (fileType === "pdf") {
+    return await parsePdf(signedUrl);
+  }
 
-    if(fileType === "video")
-    {
-        return await parseVideo(fileUrl);
-    }
+  if (fileType === "image") {
+    return await parseImage(signedUrl);
+  }
 
-    return "";
+  if (fileType === "audio") {
+    return await parseAudio(signedUrl);
+  }
+
+  if (fileType === "video") {
+    return await parseVideo(signedUrl);
+  }
+
+  return "";
 };

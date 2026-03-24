@@ -12,17 +12,19 @@ export const parseImage = async (imageUrl) => {
       model: "gemini-2.5-flash"
     });
 
-    // Fetch image
     const response = await axios.get(imageUrl, {
       responseType: "arraybuffer"
     });
 
     const base64Image = Buffer.from(response.data).toString("base64");
 
+    // ✅ Dynamic MIME detection
+    const mimeType = response.headers["content-type"] || "image/jpeg";
+
     const result = await model.generateContent([
       {
         inlineData: {
-          mimeType: "image/jpeg",
+          mimeType: mimeType,  // 🔥 works for jpg, png, webp, etc.
           data: base64Image
         }
       },
