@@ -1,32 +1,44 @@
 import axios from "axios";
 import fs from "fs";
 import { exec } from "child_process";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegPath from "ffmpeg-static";
 
-// 🔥 IMPORTANT: update this to YOUR system path
+ffmpeg.setFfmpegPath(ffmpegPath);
+
 const PYTHON_PATH = "C:/Users/hp/anaconda3/envs/whisper_env/python.exe";
 
 export const parseAudio = async (fileUrl) => {
-  let tempFile = "";
+  const inputPath = `temp_input_${Date.now()}`;
+  const outputPath = `temp_audio_${Date.now()}.wav`;
 
   try {
-    const ext = fileUrl.split(".").pop().split("?")[0] || "wav";
-    tempFile = `temp_audio_${Date.now()}.${ext}`;
-
-    // Download file (works for S3 / public URLs)
+    // ✅ Download from S3 signed URL
     const response = await axios.get(fileUrl, {
-      responseType: "arraybuffer"
+      responseType: "arraybuffer",
     });
 
-    fs.writeFileSync(tempFile, response.data);
+    fs.writeFileSync(inputPath, response.data);
 
-    // 🔥 Call Whisper via Python env
+    // ✅ Convert → WAV
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .output(outputPath)
+        .audioFrequency(16000)
+        .audioChannels(1)
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    // ✅ Whisper transcription
     const result = await new Promise((resolve, reject) => {
       exec(
-        `"${PYTHON_PATH}" whisper.py "${tempFile}"`,
+        `"${PYTHON_PATH}" whisper.py "${outputPath}"`,
         (error, stdout, stderr) => {
           if (error) {
             console.error("Whisper Error:", stderr);
-            reject(error);
+            reject(new Error(stderr || error.message));
           } else {
             resolve(stdout.trim());
           }
@@ -41,8 +53,7 @@ export const parseAudio = async (fileUrl) => {
     return "";
 
   } finally {
-    if (tempFile && fs.existsSync(tempFile)) {
-      fs.unlinkSync(tempFile);
-    }
+    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   }
 };

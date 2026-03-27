@@ -2,41 +2,53 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 import axios from "axios";
 import fs from "fs";
-import { parseAudio } from "./audioParser.js";
+import { exec } from "child_process";
 
 ffmpeg.setFfmpegPath(ffmpegPath);
+
+const PYTHON_PATH = "C:/Users/hp/anaconda3/envs/whisper_env/python.exe";
 
 export const parseVideo = async (fileUrl) => {
   let videoPath = "";
   let audioPath = "";
 
   try {
-    const ext = fileUrl.split(".").pop().split("?")[0] || "mp4";
-
-    videoPath = `temp_video_${Date.now()}.${ext}`;
+    videoPath = `temp_video_${Date.now()}.mp4`;
     audioPath = `temp_audio_${Date.now()}.wav`;
 
-    // Download video
+    // ✅ Download video from signed URL
     const response = await axios.get(fileUrl, {
-      responseType: "arraybuffer"
+      responseType: "arraybuffer",
     });
 
     fs.writeFileSync(videoPath, response.data);
 
-    // Extract audio (VERY IMPORTANT for Whisper)
+    // ✅ Extract audio
     await new Promise((resolve, reject) => {
       ffmpeg(videoPath)
         .output(audioPath)
         .noVideo()
-        .audioFrequency(16000) // required for Whisper
-        .audioChannels(1)      // mono audio
+        .audioFrequency(16000)
+        .audioChannels(1)
         .on("end", resolve)
         .on("error", reject)
         .run();
     });
 
-    // 🔥 Reuse audio parser
-    const result = await parseAudio(audioPath);
+    // ✅ Whisper transcription (LOCAL FILE → no axios)
+    const result = await new Promise((resolve, reject) => {
+      exec(
+        `"${PYTHON_PATH}" whisper.py "${audioPath}"`,
+        (error, stdout, stderr) => {
+          if (error) {
+            console.error("Whisper Error:", stderr);
+            reject(new Error(stderr || error.message));
+          } else {
+            resolve(stdout.trim());
+          }
+        }
+      );
+    });
 
     return result;
 
