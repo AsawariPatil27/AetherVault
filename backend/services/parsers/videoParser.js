@@ -9,14 +9,11 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const PYTHON_PATH = "C:/Users/hp/anaconda3/envs/whisper_env/python.exe";
 
 export const parseVideo = async (fileUrl) => {
-  let videoPath = "";
-  let audioPath = "";
+  let videoPath = `temp_video_${Date.now()}.mp4`;
+  let audioPath = `temp_audio_${Date.now()}.wav`;
 
   try {
-    videoPath = `temp_video_${Date.now()}.mp4`;
-    audioPath = `temp_audio_${Date.now()}.wav`;
-
-    // ✅ Download video from signed URL
+    // ✅ Download video
     const response = await axios.get(fileUrl, {
       responseType: "arraybuffer",
     });
@@ -35,22 +32,27 @@ export const parseVideo = async (fileUrl) => {
         .run();
     });
 
-    // ✅ Whisper transcription (LOCAL FILE → no axios)
+    // ✅ Whisper transcription
     const result = await new Promise((resolve, reject) => {
       exec(
         `"${PYTHON_PATH}" whisper.py "${audioPath}"`,
         (error, stdout, stderr) => {
           if (error) {
             console.error("Whisper Error:", stderr);
-            reject(new Error(stderr || error.message));
-          } else {
-            resolve(stdout.trim());
+            return reject(new Error(stderr || error.message));
           }
+          resolve(stdout);
         }
       );
     });
 
-    return result;
+    // ✅ CLEAN OUTPUT
+    const cleaned = result
+      ?.replace(/\[.*?\]/g, "")
+      ?.replace(/\s+/g, " ")
+      ?.trim();
+
+    return cleaned || "";
 
   } catch (error) {
     console.error("Video parsing error:", error);

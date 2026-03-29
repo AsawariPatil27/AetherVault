@@ -1,38 +1,29 @@
-import Document from "../models/Document.js";
 import mongoose from "mongoose";
-import { parseFile } from "../services/parsers/parserEngine.js";
+import Chunk from "../models/Chunk.js";
 
 export const parseDocument = async (req, res) => {
   try {
     const { id } = req.params;
 
-
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: "Invalid document ID" });
     }
 
-    const doc = await Document.findById(id);
+    const chunks = await Chunk.find({ documentId: id }).sort({
+      "metadata.chunkIndex": 1
+    });
 
-
-    if (!doc) {
-      return res.status(404).json({ error: "Document not found" });
+    if (!chunks || chunks.length === 0) {
+      return res.status(404).json({ error: "No chunks found for this document" });
     }
 
-    if (!doc.fileKey) {
-      console.error("Missing fileKey in document!");
-      return res.status(500).json({ error: "File key missing in DB" });
-    }
-
-    const text = await parseFile(doc.fileKey, doc.fileType);
-
-    if (!text) {
-      return res.status(500).json({ error: "Failed to extract content" });
-    }
-
-    res.json({ text });
+    res.json({
+      documentId: id,
+      chunks
+    });
 
   } catch (error) {
-    console.error("PARSE ERROR:", error);
-    res.status(500).json({ error: "Parsing failed" });
+    console.error("FETCH CHUNKS ERROR:", error);
+    res.status(500).json({ error: "Failed to fetch chunks" });
   }
 };

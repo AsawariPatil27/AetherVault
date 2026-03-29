@@ -3,24 +3,25 @@ import fs from "fs";
 import { exec } from "child_process";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
+import path from "path";
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const PYTHON_PATH = "C:/Users/hp/anaconda3/envs/whisper_env/python.exe";
 
 export const parseAudio = async (fileUrl) => {
-  const inputPath = `temp_input_${Date.now()}`;
+  const inputPath = `temp_input_${Date.now()}.mp3`; // ✅ FIX: extension added
   const outputPath = `temp_audio_${Date.now()}.wav`;
 
   try {
-    // ✅ Download from S3 signed URL
+    // ✅ Download file
     const response = await axios.get(fileUrl, {
       responseType: "arraybuffer",
     });
 
     fs.writeFileSync(inputPath, response.data);
 
-    // ✅ Convert → WAV
+    // ✅ Convert to WAV
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
         .output(outputPath)
@@ -38,15 +39,20 @@ export const parseAudio = async (fileUrl) => {
         (error, stdout, stderr) => {
           if (error) {
             console.error("Whisper Error:", stderr);
-            reject(new Error(stderr || error.message));
-          } else {
-            resolve(stdout.trim());
+            return reject(new Error(stderr || error.message));
           }
+          resolve(stdout);
         }
       );
     });
 
-    return result;
+    // ✅ CLEAN OUTPUT
+    const cleaned = result
+      ?.replace(/\[.*?\]/g, "") // remove timestamps
+      ?.replace(/\s+/g, " ")
+      ?.trim();
+
+    return cleaned || "";
 
   } catch (error) {
     console.error("Audio parsing error:", error);

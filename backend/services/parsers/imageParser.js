@@ -17,32 +17,29 @@ export const parseImage = async (imageUrl) => {
     });
 
     const base64Image = Buffer.from(response.data).toString("base64");
-
-    // ✅ Dynamic MIME detection
     const mimeType = response.headers["content-type"] || "image/jpeg";
 
     const result = await model.generateContent([
       {
         inlineData: {
-          mimeType: mimeType,  // 🔥 works for jpg, png, webp, etc.
+          mimeType,
           data: base64Image
         }
       },
       {
         text: `
-Extract the following:
-1. All visible text
-2. What the image contains (objects, scene)
+Extract ALL visible text exactly as it appears.
 
-Return format:
-TEXT:
-...
-CONTEXT:
-...`
+Rules:
+- Do NOT explain
+- Do NOT summarize
+- Do NOT add context
+- If no text, return empty string
+`
       }
     ]);
 
-    return result.response.text();
+    return result?.response?.text()?.trim() || "";
 
   } catch (error) {
     console.error("Gemini Error:", error);
