@@ -5,6 +5,7 @@ import express from "express";
 import cors from "cors";
 import { connectDB } from "./database/mongoConnection.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
+import chatRoutes from "./routes/chatRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import parseRoutes from "./routes/parseRoutes.js";
 
@@ -18,6 +19,7 @@ connectDB();
 
 // ✅ ROUTES FIRST
 app.use("/upload", uploadRoutes);
+app.use("/chat", chatRoutes);
 app.use("/user", userRoutes);
 app.use("/parse", parseRoutes);
 

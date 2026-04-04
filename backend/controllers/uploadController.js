@@ -2,7 +2,9 @@ import Document from "../models/Document.js";
 import mongoose from "mongoose";
 import { parseFile } from "../services/parsers/parserEngine.js";
 import { chunkText } from "../services/etl/chunker.js";
+import { embedChunks } from "../services/etl/embeddingService.js";
 import Chunk from "../models/Chunk.js";
+import Chat from "../models/Chat.js";
 
 export const uploadHandler = async (req, res) => {
   try {
@@ -14,14 +16,28 @@ export const uploadHandler = async (req, res) => {
 
     const userId = req.user.id;
 
-    const rawChatId = req.body.chatId;
-    let chatId;
+    const rawChatId =
+      typeof req.body?.chatId === "string" ? req.body.chatId.trim() : "";
 
-    if (rawChatId && mongoose.Types.ObjectId.isValid(rawChatId)) {
-      chatId = new mongoose.Types.ObjectId(rawChatId);
-    } else {
-      chatId = new mongoose.Types.ObjectId();
+    if (!rawChatId) {
+      return res.status(400).json({ error: "chatId is required" });
     }
+
+    if (!mongoose.Types.ObjectId.isValid(rawChatId)) {
+      return res.status(400).json({ error: "Invalid chatId" });
+    }
+
+    const chat = await Chat.findById(rawChatId);
+
+    if (!chat) {
+      return res.status(404).json({ error: "Chat not found" });
+    }
+
+    if (chat.userId !== userId) {
+      return res.status(403).json({ error: "Chat does not belong to this user" });
+    }
+
+    const chatId = chat._id;
 
     const savedDocs = [];
 
@@ -75,25 +91,42 @@ export const uploadHandler = async (req, res) => {
           if (!chunks.length) {
             console.warn(`⚠️ Using fallback chunk for: ${doc.fileName}`);
 
+            let embedding = [];
+            try {
+              const vectors = await embedChunks([text]);
+              embedding = vectors[0] || [];
+            } catch (embedErr) {
+              console.error("❌ Embedding failed (fallback chunk):", embedErr);
+            }
+
             await Chunk.create({
               userId,
               chatId,
               documentId: doc._id,
               text: text,
-              embedding: [],
+              embedding,
               metadata: { chunkIndex: 0 },
             });
 
             return;
           }
 
-          // ✅ STEP 3: STORE
+          // ✅ STEP 3: EMBED
+          let embeddings = [];
+          try {
+            embeddings = await embedChunks(chunks);
+          } catch (embedErr) {
+            console.error("❌ Embedding failed:", embedErr);
+            embeddings = chunks.map(() => []);
+          }
+
+          // ✅ STEP 4: STORE
           const chunkDocs = chunks.map((chunk, index) => ({
             userId,
             chatId,
             documentId: doc._id,
-            text: chunk, // 🔥 RAW ONLY
-            embedding: [],
+            text: chunk,
+            embedding: embeddings[index] || [],
             metadata: {
               chunkIndex: index,
             },
@@ -110,7 +143,7 @@ export const uploadHandler = async (req, res) => {
 
     res.json({
       message: "Upload successful, processing started 🚀",
-      chatId,
+      chatId: chatId.toString(),
       documents: savedDocs,
     });
   } catch (error) {
