@@ -105,7 +105,12 @@ export const uploadHandler = async (req, res) => {
               documentId: doc._id,
               text: text,
               embedding,
-              metadata: { chunkIndex: 0 },
+              metadata: {
+                chunkIndex: 0,
+                sourceType: doc.fileType,
+                fileKey: doc.fileKey,
+                fileName: doc.fileName,
+              },
             });
 
             return;
@@ -129,6 +134,9 @@ export const uploadHandler = async (req, res) => {
             embedding: embeddings[index] || [],
             metadata: {
               chunkIndex: index,
+              sourceType: doc.fileType,
+              fileKey: doc.fileKey,
+              fileName: doc.fileName,
             },
           }));
 

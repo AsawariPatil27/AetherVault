@@ -29,6 +29,13 @@ const chunkSchema = new mongoose.Schema({
   },
 
   metadata: {
+    chunkIndex: Number,
+    sourceType: {
+      type: String,
+      enum: ["pdf", "image", "audio", "video"],
+    },
+    fileKey: String,
+    fileName: String,
     page: Number,
     timestamp: Number   // for audio/video
   }

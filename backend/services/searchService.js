@@ -1,0 +1,162 @@
+import Chunk from "../models/Chunk.js";
+import { embedChunks } from "./etl/embeddingService.js";
+import { getSignedFileUrl } from "../utils/s3SignedUrl.js";
+
+// ✅ Separate indexes
+const VECTOR_INDEX = process.env.ATLAS_VECTOR_INDEX || "chunks_hybrid";
+const TEXT_INDEX = process.env.ATLAS_TEXT_INDEX || "chunks_text";
+
+const SOURCE_TYPES = new Set(["pdf", "image", "audio", "video"]);
+const RRF_K = 60;
+
+// 🔹 Build filter for Mongo match stage
+function buildMatch(userId, sourceType) {
+  const match = { userId };
+  if (sourceType) {
+    match["metadata.sourceType"] = sourceType;
+  }
+  return match;
+}
+
+// 🔹 RRF Fusion
+function reciprocalRankFusion(vectorHits, textHits, limit) {
+  const scores = new Map();
+  const docs = new Map();
+
+  vectorHits.forEach((doc, rank) => {
+    const id = String(doc._id);
+    docs.set(id, doc);
+    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
+  });
+
+  textHits.forEach((doc, rank) => {
+    const id = String(doc._id);
+    docs.set(id, doc);
+    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
+  });
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id, score]) => ({
+      ...docs.get(id),
+      score,
+    }));
+}
+
+// 🔹 VECTOR SEARCH
+async function runVectorSearch(queryVector, userId, sourceType, limit) {
+  return Chunk.aggregate([
+    {
+      $search: {
+        index: VECTOR_INDEX,
+        vectorSearch: {
+          path: "embedding",
+          queryVector,
+          numCandidates: 150,
+          limit,
+        },
+      },
+    },
+    { $match: buildMatch(userId, sourceType) },
+    {
+      $project: {
+        embedding: 0,
+        score: { $meta: "searchScore" },
+      },
+    },
+  ]);
+}
+
+// 🔹 TEXT SEARCH
+async function runTextSearch(query, userId, sourceType, limit) {
+  return Chunk.aggregate([
+    {
+      $search: {
+        index: TEXT_INDEX,
+        text: {
+          query,
+          path: "text",
+        },
+      },
+    },
+    { $match: buildMatch(userId, sourceType) },
+    { $limit: limit },
+    {
+      $project: {
+        embedding: 0,
+        score: { $meta: "searchScore" },
+      },
+    },
+  ]);
+}
+
+// 🔹 Attach media URLs
+async function attachMediaUrls(results) {
+  return Promise.all(
+    results.map(async (doc) => {
+      let mediaUrl = null;
+
+      if (doc.metadata?.fileKey) {
+        try {
+          mediaUrl = await getSignedFileUrl(doc.metadata.fileKey);
+        } catch (err) {
+          console.warn("Signed URL failed:", err.message);
+        }
+      }
+
+      return { ...doc, mediaUrl };
+    })
+  );
+}
+
+// 🔥 MAIN HYBRID SEARCH
+export async function hybridSearch(query, userId, options = {}) {
+  const raw = (query || "").trim();
+  if (!raw) {
+    const err = new Error("query is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let sourceType = options.sourceType;
+  if (sourceType && !SOURCE_TYPES.has(sourceType)) {
+    const err = new Error("Invalid sourceType");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const limit = Math.min(Math.max(options.limit || 8, 1), 20);
+
+  let queryVector = null;
+
+  try {
+    const vectors = await embedChunks([raw]);
+    queryVector = vectors?.[0];
+  } catch (err) {
+    console.warn("Embedding failed, fallback to text search");
+  }
+
+  let vectorResults = [];
+  let textResults = [];
+
+  if (queryVector?.length) {
+    vectorResults = await runVectorSearch(
+      queryVector,
+      userId,
+      sourceType,
+      limit * 2
+    );
+  }
+
+  textResults = await runTextSearch(
+    raw,
+    userId,
+    sourceType,
+    limit * 2
+  );
+
+  const merged = reciprocalRankFusion(vectorResults, textResults, limit);
+
+  return attachMediaUrls(merged);
+}

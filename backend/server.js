@@ -8,6 +8,7 @@ import uploadRoutes from "./routes/uploadRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import parseRoutes from "./routes/parseRoutes.js";
+import searchRoutes from "./routes/searchRoutes.js";
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.use("/upload", uploadRoutes);
 app.use("/chat", chatRoutes);
 app.use("/user", userRoutes);
 app.use("/parse", parseRoutes);
+app.use("/search", searchRoutes);
 
 
 app.get("/", (req, res) => {
