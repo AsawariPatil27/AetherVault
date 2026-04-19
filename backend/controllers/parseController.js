@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Chunk from "../models/Chunk.js";
+import { embedChunks } from "../services/etl/embeddingService.js";
 
 export const parseDocument = async (req, res) => {
   try {

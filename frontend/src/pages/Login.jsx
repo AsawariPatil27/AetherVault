@@ -19,7 +19,8 @@ function Login() {
   }
 
   if (data?.session) {
-    const token = data.session.access_token;  // 🔥 get JWT
+    const token = data.session.access_token; 
+    console.log("TOKEN:", token); // 🔥 get JWT
 
     // 🔥 CALL BACKEND
     await axios.post(

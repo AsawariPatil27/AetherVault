@@ -1,6 +1,7 @@
 import Chunk from "../models/Chunk.js";
 import { embedChunks } from "./etl/embeddingService.js";
 import { getSignedFileUrl } from "../utils/s3SignedUrl.js";
+import mongoose from "mongoose";
 
 // ✅ Separate indexes
 const VECTOR_INDEX = process.env.ATLAS_VECTOR_INDEX || "chunks_hybrid";
@@ -9,13 +10,20 @@ const TEXT_INDEX = process.env.ATLAS_TEXT_INDEX || "chunks_text";
 const SOURCE_TYPES = new Set(["pdf", "image", "audio", "video"]);
 const RRF_K = 60;
 
-// 🔹 Build filter for Mongo match stage
-function buildMatch(userId, sourceType) {
-  const match = { userId };
+function buildSearchFilter(userId, chatId, sourceType) {
+  const filter = [{ equals: { path: "userId", value: userId } }];
+  filter.push({
+    equals: {
+      path: "chatId",
+      value: new mongoose.Types.ObjectId(chatId),
+    },
+  });
   if (sourceType) {
-    match["metadata.sourceType"] = sourceType;
+    filter.push({
+      equals: { path: "metadata.sourceType", value: sourceType },
+    });
   }
-  return match;
+  return { compound: { filter } };
 }
 
 // 🔹 RRF Fusion
@@ -25,67 +33,88 @@ function reciprocalRankFusion(vectorHits, textHits, limit) {
 
   vectorHits.forEach((doc, rank) => {
     const id = String(doc._id);
-    docs.set(id, doc);
+    const existing = docs.get(id);
+    docs.set(id, existing ? { ...existing, ...doc } : doc);
     scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
   });
 
   textHits.forEach((doc, rank) => {
     const id = String(doc._id);
-    docs.set(id, doc);
+    const existing = docs.get(id);
+    docs.set(id, existing ? { ...existing, ...doc } : doc);
     scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
   });
 
   return [...scores.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
-    .map(([id, score]) => ({
-      ...docs.get(id),
-      score,
-    }));
+    .map(([id, score]) => {
+      const doc = docs.get(id);
+      return {
+        ...doc,
+        hybridScore: score,
+      };
+    });
 }
 
 // 🔹 VECTOR SEARCH
-async function runVectorSearch(queryVector, userId, sourceType, limit) {
+async function runVectorSearch(queryVector, userId, chatId, sourceType, limit) {
+  const numCandidates = Math.min(Math.max(limit * 20, 150), 2000);
+
   return Chunk.aggregate([
     {
-      $search: {
+      $vectorSearch: {
         index: VECTOR_INDEX,
-        vectorSearch: {
-          path: "embedding",
-          queryVector,
-          numCandidates: 150,
-          limit,
+        path: "embedding",
+        queryVector,
+        numCandidates,
+        limit,
+        filter: {
+          userId: userId,
+          chatId: new mongoose.Types.ObjectId(chatId),
+          ...(sourceType && { "metadata.sourceType": sourceType }),
         },
       },
     },
-    { $match: buildMatch(userId, sourceType) },
     {
       $project: {
         embedding: 0,
-        score: { $meta: "searchScore" },
+        vectorScore: { $meta: "vectorSearchScore" },
       },
     },
   ]);
 }
 
 // 🔹 TEXT SEARCH
-async function runTextSearch(query, userId, sourceType, limit) {
+async function runTextSearch(query, userId, chatId, sourceType, limit) {
   return Chunk.aggregate([
     {
       $search: {
         index: TEXT_INDEX,
-        text: {
-          query,
-          path: "text",
+        compound: {
+          filter: buildSearchFilter(userId, chatId, sourceType).compound.filter,
+          should: [
+            {
+              text: {
+                query,
+                path: "text",
+              },
+            },
+          ],
+          minimumShouldMatch: 1,
         },
       },
     },
-    { $match: buildMatch(userId, sourceType) },
+    {
+      $addFields: {
+        textScore: { $meta: "searchScore" },
+      },
+    },
+    { $sort: { textScore: -1 } },
     { $limit: limit },
     {
       $project: {
         embedding: 0,
-        score: { $meta: "searchScore" },
       },
     },
   ]);
@@ -119,6 +148,19 @@ export async function hybridSearch(query, userId, options = {}) {
     throw err;
   }
 
+  const rawChatId =
+    typeof options.chatId === "string" ? options.chatId.trim() : "";
+  if (!rawChatId) {
+    const err = new Error("chatId is required");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!mongoose.Types.ObjectId.isValid(rawChatId)) {
+    const err = new Error("Invalid chatId");
+    err.statusCode = 400;
+    throw err;
+  }
+
   let sourceType = options.sourceType;
   if (sourceType && !SOURCE_TYPES.has(sourceType)) {
     const err = new Error("Invalid sourceType");
@@ -126,7 +168,8 @@ export async function hybridSearch(query, userId, options = {}) {
     throw err;
   }
 
-  const limit = Math.min(Math.max(options.limit || 8, 1), 20);
+  const parsedLimit = Number(options.limit ?? options.topK ?? 8);
+  const limit = Math.min(Math.max(Number.isFinite(parsedLimit) ? parsedLimit : 8, 1), 20);
 
   let queryVector = null;
 
@@ -144,17 +187,13 @@ export async function hybridSearch(query, userId, options = {}) {
     vectorResults = await runVectorSearch(
       queryVector,
       userId,
+      rawChatId,
       sourceType,
       limit * 2
     );
   }
 
-  textResults = await runTextSearch(
-    raw,
-    userId,
-    sourceType,
-    limit * 2
-  );
+  textResults = await runTextSearch(raw, userId, rawChatId, sourceType, limit * 2);
 
   const merged = reciprocalRankFusion(vectorResults, textResults, limit);
 
