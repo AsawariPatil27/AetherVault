@@ -1,11 +1,21 @@
 import mongoose from "mongoose";
 import Chat from "../models/Chat.js";
 import { hybridSearch } from "../services/searchService.js";
-import { generateAnswer } from "../services/ai/groqService.js";
+import { streamAnswer, generateDiagram } from "../services/ai/groqService.js";
+
+const buildSources = (chunks) =>
+  chunks.map((c) => ({
+    text: c.text,
+    fileName: c.metadata?.fileName,
+    sourceType: c.metadata?.sourceType,
+    chunkIndex: c.metadata?.chunkIndex,
+    hybridScore: c.hybridScore,
+    mediaUrl: c.mediaUrl,
+  }));
 
 export const askQuestion = async (req, res) => {
   try {
-    const { query, chatId } = req.body ?? {};
+    const { query, chatId, mode = "text" } = req.body ?? {};
     const userId = req.user.id;
 
     if (!query?.trim()) return res.status(400).json({ error: "query is required" });
@@ -20,30 +30,64 @@ export const askQuestion = async (req, res) => {
     const chunks = await hybridSearch(query, userId, { chatId });
     console.log(`[ask] retrieval done — ${chunks.length} chunks`);
 
-    if (!chunks.length) {
-      return res.json({
-        answer: "I couldn't find any relevant content in your uploaded documents for that question.",
-        sources: [],
-      });
+    // Image mode — regular JSON response (Mermaid needs full code, no streaming)
+    if (mode === "image") {
+      if (!chunks.length) {
+        return res.json({
+          mode: "image",
+          answer: "I couldn't find any relevant content in your uploaded documents for that question.",
+          sources: [],
+        });
+      }
+
+      const sourcesPayload = buildSources(chunks);
+      console.log("[ask] generating Mermaid diagram...");
+      const diagram = await generateDiagram(query, chunks);
+
+      if (diagram === "NO_RELEVANT_CONTENT") {
+        return res.json({
+          mode: "image",
+          answer: "I couldn't find relevant content in your documents to generate a diagram for that question.",
+          sources: [],
+        });
+      }
+
+      console.log("[ask] diagram ready");
+      return res.json({ mode: "image", diagram, sources: sourcesPayload });
     }
 
-    console.log("[ask] calling Groq...");
-    const answer = await generateAnswer(query, chunks);
-    console.log("[ask] Groq responded");
+    // Text / Audio — SSE streaming
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
 
-    return res.json({
-      answer,
-      sources: chunks.map((c) => ({
-        text: c.text,
-        fileName: c.metadata?.fileName,
-        sourceType: c.metadata?.sourceType,
-        chunkIndex: c.metadata?.chunkIndex,
-        hybridScore: c.hybridScore,
-        mediaUrl: c.mediaUrl,
-      })),
-    });
+    const sseEnd = (payload) => {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      res.end();
+    };
+
+    if (!chunks.length) {
+      res.write(`data: ${JSON.stringify({ token: "I couldn't find any relevant content in your uploaded documents for that question." })}\n\n`);
+      return sseEnd({ done: true, sources: [] });
+    }
+
+    const sourcesPayload = buildSources(chunks);
+
+    try {
+      console.log("[ask] streaming Groq...");
+      await streamAnswer(query, chunks, res);
+      console.log("[ask] stream complete");
+      return sseEnd({ done: true, sources: sourcesPayload });
+    } catch (streamErr) {
+      console.error("[ask] stream error:", streamErr);
+      return sseEnd({ error: streamErr.message || "Failed to generate answer" });
+    }
   } catch (err) {
     console.error("ASK ERROR:", err);
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ error: err.message || "Server error" })}\n\n`);
+      return res.end();
+    }
     return res.status(500).json({ error: "Failed to generate answer", detail: err.message });
   }
 };
