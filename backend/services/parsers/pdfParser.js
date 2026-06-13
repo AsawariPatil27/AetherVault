@@ -1,47 +1,17 @@
 import axios from "axios";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import { stripLoneSurrogates } from "../../utils/textSanitize.js";
+
+const EMBEDDING_URL = process.env.EMBEDDING_SERVER_URL || "http://localhost:5002";
 
 export const parsePdf = async (fileUrl) => {
   try {
-    const response = await axios.get(fileUrl, {
-      responseType: "arraybuffer",
-    });
-
-    const loadingTask = pdfjsLib.getDocument({
-      data: new Uint8Array(response.data),
-    });
-
-    const pdf = await loadingTask.promise;
-
-    let text = "";
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-
-      // ✅ Extract clean strings
-      const strings = content.items
-        .map(item => item.str)
-        .filter(str => str && str.trim().length > 0);
-
-      // ✅ Join with proper spacing
-      const pageText = strings.join(" ");
-
-      // ✅ Add spacing between pages (no noisy labels)
-      text += pageText + "\n\n";
-    }
-
-    // ✅ Final cleanup (strip lone surrogates from PDF.js before embed/tokenize)
-    return stripLoneSurrogates(
-      text
-        .replace(/\s+/g, " ") // normalize spaces
-        .replace(/\n\s+/g, "\n")
-        .trim()
+    const { data } = await axios.post(
+      `${EMBEDDING_URL}/parse-pdf`,
+      { url: fileUrl },
+      { timeout: 120_000 }
     );
-
+    return data.text || "";
   } catch (error) {
-    console.error("PDF parsing error:", error);
+    console.error("Docling PDF parsing error:", error.message);
     return "";
   }
 };

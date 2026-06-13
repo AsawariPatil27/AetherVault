@@ -171,31 +171,23 @@ export async function hybridSearch(query, userId, options = {}) {
   const parsedLimit = Number(options.limit ?? options.topK ?? 8);
   const limit = Math.min(Math.max(Number.isFinite(parsedLimit) ? parsedLimit : 8, 1), 20);
 
-  let queryVector = null;
+  // Text search needs no embedding — start it immediately
+  const textResultsPromise = runTextSearch(raw, userId, rawChatId, sourceType, limit * 2);
 
+  // Embed the query, then kick off vector search (overlaps with text search above)
+  let vectorResultsPromise = Promise.resolve([]);
   try {
     const vectors = await embedChunks([raw]);
-    queryVector = vectors?.[0];
+    const queryVector = vectors?.[0];
+    if (queryVector?.length) {
+      vectorResultsPromise = runVectorSearch(queryVector, userId, rawChatId, sourceType, limit * 2);
+    }
   } catch (err) {
-    console.warn("Embedding failed, fallback to text search");
+    console.warn("Embedding failed, falling back to text-only search:", err.message);
   }
 
-  let vectorResults = [];
-  let textResults = [];
-
-  if (queryVector?.length) {
-    vectorResults = await runVectorSearch(
-      queryVector,
-      userId,
-      rawChatId,
-      sourceType,
-      limit * 2
-    );
-  }
-
-  textResults = await runTextSearch(raw, userId, rawChatId, sourceType, limit * 2);
+  const [vectorResults, textResults] = await Promise.all([vectorResultsPromise, textResultsPromise]);
 
   const merged = reciprocalRankFusion(vectorResults, textResults, limit);
-
   return attachMediaUrls(merged);
 }

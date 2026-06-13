@@ -6,6 +6,15 @@ import { dashboardType } from "../dashboardTokens";
 const API_BASE = "http://localhost:5000";
 const ty = dashboardType;
 
+function getCitedSources(answerText, sources) {
+  const matches = [...(answerText || "").matchAll(/\[(\d+)\]/g)];
+  const cited = new Set(matches.map((m) => parseInt(m[1]) - 1));
+  const valid = [...cited].filter((i) => i >= 0 && i < sources.length).sort((a, b) => a - b);
+  return valid.length > 0
+    ? valid.map((i) => ({ ...sources[i], citationNum: i + 1 }))
+    : sources.map((s, i) => ({ ...s, citationNum: i + 1 }));
+}
+
 async function getAuthHeaders() {
   const { data } = await supabase.auth.getSession();
   const token = data?.session?.access_token;
@@ -13,45 +22,39 @@ async function getAuthHeaders() {
   return { Authorization: `Bearer ${token}` };
 }
 
-/**
- * Center column: query input + hybrid search results.
- */
 export default function ChatQueryPanel({ chatId, t }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [searchErr, setSearchErr] = useState(null);
+  const [answer, setAnswer] = useState(null);
+  const [sources, setSources] = useState([]);
+  const [asking, setAsking] = useState(false);
+  const [askErr, setAskErr] = useState(null);
   const styles = buildStyles(t);
 
   useEffect(() => {
     setQuery("");
-    setResults([]);
-    setSearchErr(null);
-    setSearching(false);
+    setAnswer(null);
+    setSources([]);
+    setAskErr(null);
+    setAsking(false);
   }, [chatId]);
 
-  const runSearch = async () => {
+  const runAsk = async () => {
     const q = query.trim();
     if (!chatId || !q) return;
-    setSearching(true);
-    setSearchErr(null);
+    setAsking(true);
+    setAskErr(null);
+    setAnswer(null);
+    setSources([]);
     try {
       const headers = await getAuthHeaders();
-      if (!headers) {
-        setSearchErr("Not signed in.");
-        return;
-      }
-      const res = await axios.post(
-        `${API_BASE}/search`,
-        { query: q, chatId },
-        { headers }
-      );
-      setResults(res.data.results || []);
+      if (!headers) { setAskErr("Not signed in."); return; }
+      const res = await axios.post(`${API_BASE}/ask`, { query: q, chatId }, { headers });
+      setAnswer(res.data.answer);
+      setSources(res.data.sources || []);
     } catch (e) {
-      setSearchErr(e.response?.data?.error || e.message || "Search failed");
-      setResults([]);
+      setAskErr(e.response?.data?.error || e.message || "Request failed");
     } finally {
-      setSearching(false);
+      setAsking(false);
     }
   };
 
@@ -59,7 +62,7 @@ export default function ChatQueryPanel({ chatId, t }) {
     <div style={styles.root}>
       <h3 style={styles.heading}>Ask your documents</h3>
       <p style={styles.sub}>
-        Search this chat using semantic similarity and keyword matching.
+        Ask a question — the AI will search your uploads and answer based on what it finds.
       </p>
 
       <div style={styles.inputRow}>
@@ -70,214 +73,163 @@ export default function ChatQueryPanel({ chatId, t }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              runSearch();
-            }
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); runAsk(); }
           }}
         />
         <div style={styles.inputActions}>
           <button
             type="button"
             style={{
-              ...styles.searchBtn,
-              ...(!query.trim() || searching ? styles.searchBtnDisabled : {}),
+              ...styles.askBtn,
+              ...(!query.trim() || asking ? styles.askBtnDisabled : {}),
             }}
-            onClick={runSearch}
-            disabled={!query.trim() || searching || !chatId}
+            onClick={runAsk}
+            disabled={!query.trim() || asking || !chatId}
           >
-            {searching ? <span style={styles.miniSpinner} /> : "Search"}
+            {asking ? <span style={styles.miniSpinner} /> : "Ask"}
           </button>
         </div>
       </div>
-      {searchErr && <div style={styles.errBanner}>{searchErr}</div>}
 
-      <div style={styles.resultsHeader}>
-        <span style={styles.resultsTitle}>Results</span>
-        {!searching && results.length > 0 && (
-          <span style={styles.countBadge}>{results.length}</span>
-        )}
-      </div>
+      {askErr && <div style={styles.errBanner}>{askErr}</div>}
 
-      <div style={styles.results}>
-        {!searching && results.length === 0 && (
-          <p style={styles.hint}>
-            Run a search to see matching passages from your uploads.
-          </p>
-        )}
-        {results.map((r) => (
-          <div key={r._id} style={styles.resultCard}>
-            <div style={styles.resultMeta}>
-              <span style={styles.badge}>{r.metadata?.sourceType || "chunk"}</span>
-              {r.metadata?.fileName && (
-                <span style={styles.fileTag}>{r.metadata.fileName}</span>
-              )}
-            </div>
-            <p style={styles.resultText}>{r.text}</p>
+      {asking && (
+        <div style={styles.thinkingRow}>
+          <span style={styles.thinkingDot} />
+          <span style={styles.thinkingDot} />
+          <span style={styles.thinkingDot} />
+          <span style={{ ...styles.thinkingLabel, color: t.dim }}>Thinking…</span>
+        </div>
+      )}
+
+      {answer && (
+        <div style={styles.answerBlock}>
+          <div style={styles.answerHeader}>
+            <span style={{ ...styles.answerLabel, color: t.accent }}>Answer</span>
           </div>
-        ))}
-      </div>
+          <p style={{ ...styles.answerText, color: t.text }}>{answer}</p>
+
+          {sources.length > 0 && (
+            <div style={styles.sourcesSection}>
+              <div style={{ ...styles.sourcesLabel, color: t.label }}>Sources</div>
+              <div style={styles.sourcesList}>
+                {getCitedSources(answer, sources).map((s) => (
+                  <div key={s.citationNum} style={{ ...styles.sourceCard, borderColor: t.border, background: t.card }}>
+                    <div style={styles.sourceMeta}>
+                      <span style={{ ...styles.sourceNum, color: "#fff", background: t.accent }}>
+                        {s.citationNum}
+                      </span>
+                      <span style={{ ...styles.badge, color: t.accent, background: t.chipActive }}>
+                        {s.sourceType || "chunk"}
+                      </span>
+                      {s.fileName && (
+                        <span style={{ ...styles.fileTag, color: t.muted }}>{s.fileName}</span>
+                      )}
+                    </div>
+                    <p style={{ ...styles.sourceText, color: t.body }}>
+                      {s.text.length > 200 ? s.text.slice(0, 200) + "…" : s.text}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 function buildStyles(t) {
   return {
-    root: {
-      flex: 1,
-      minWidth: 0,
-      display: "flex",
-      flexDirection: "column",
-    },
+    root: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column" },
     heading: {
-      fontSize: ty.lg,
-      fontWeight: 700,
-      color: t.text,
-      marginBottom: 6,
-      letterSpacing: "-0.02em",
-      lineHeight: 1.25,
+      fontSize: ty.lg, fontWeight: 700, color: t.text,
+      marginBottom: 6, letterSpacing: "-0.02em", lineHeight: 1.25,
     },
     sub: {
-      fontSize: ty.sm,
-      color: t.body,
-      marginBottom: 20,
-      lineHeight: 1.55,
-      maxWidth: 520,
+      fontSize: ty.sm, color: t.body,
+      marginBottom: 20, lineHeight: 1.55, maxWidth: 520,
     },
-    inputRow: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 12,
-    },
+    inputRow: { display: "flex", flexDirection: "column", gap: 12 },
     textarea: {
-      width: "100%",
-      resize: "vertical",
-      minHeight: 96,
-      padding: "14px 16px",
-      borderRadius: 12,
-      border: `1px solid ${t.border}`,
-      background: t.inputBg,
-      color: t.text,
-      fontSize: ty.base,
-      fontFamily: "inherit",
-      outline: "none",
-      lineHeight: 1.6,
+      width: "100%", resize: "vertical", minHeight: 96,
+      padding: "14px 16px", borderRadius: 12,
+      border: `1px solid ${t.border}`, background: t.inputBg,
+      color: t.text, fontSize: ty.base, fontFamily: "inherit",
+      outline: "none", lineHeight: 1.6,
     },
-    inputActions: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-    },
-    searchBtn: {
-      padding: "11px 24px",
-      borderRadius: 10,
-      border: "none",
+    inputActions: { display: "flex", alignItems: "center", gap: 10 },
+    askBtn: {
+      padding: "11px 24px", borderRadius: 10, border: "none",
       background: `linear-gradient(135deg, ${t.accent}, ${t.accentSoft})`,
-      color: "#fff",
-      fontSize: ty.sm,
-      fontWeight: 700,
-      cursor: "pointer",
-      minWidth: 110,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      boxShadow: `0 4px 16px ${t.accent}36`,
+      color: "#fff", fontSize: ty.sm, fontWeight: 700, cursor: "pointer",
+      minWidth: 110, display: "flex", alignItems: "center",
+      justifyContent: "center", boxShadow: `0 4px 16px ${t.accent}36`,
     },
-    searchBtnDisabled: { opacity: 0.45, cursor: "not-allowed", boxShadow: "none" },
+    askBtnDisabled: { opacity: 0.45, cursor: "not-allowed", boxShadow: "none" },
     miniSpinner: {
-      width: 16,
-      height: 16,
-      borderRadius: "50%",
+      width: 16, height: 16, borderRadius: "50%",
       border: "2px solid rgba(255,255,255,0.35)",
-      borderTopColor: "#fff",
-      animation: "spin 0.7s linear infinite",
+      borderTopColor: "#fff", animation: "spin 0.7s linear infinite",
     },
     errBanner: {
-      marginTop: 12,
-      padding: "12px 14px",
-      borderRadius: 10,
-      fontSize: ty.sm,
-      lineHeight: 1.5,
-      background: t.errBg,
-      border: `1px solid ${t.errBorder}`,
-      color: t.errText,
+      marginTop: 12, padding: "12px 14px", borderRadius: 10,
+      fontSize: ty.sm, lineHeight: 1.5,
+      background: t.errBg, border: `1px solid ${t.errBorder}`, color: t.errText,
     },
-    resultsHeader: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginTop: 28,
-      marginBottom: 12,
+    thinkingRow: {
+      display: "flex", alignItems: "center", gap: 6, marginTop: 24,
     },
-    resultsTitle: {
-      fontSize: ty.xs,
-      fontWeight: 700,
-      letterSpacing: "0.07em",
-      color: t.label,
-      textTransform: "uppercase",
+    thinkingDot: {
+      width: 7, height: 7, borderRadius: "50%",
+      background: t.accent, animation: "pulse 1.2s ease-in-out infinite",
     },
-    countBadge: {
-      fontSize: ty.xs,
-      fontWeight: 700,
-      padding: "3px 10px",
-      borderRadius: 999,
-      background: t.chipActive,
-      color: t.text,
+    thinkingLabel: { fontSize: ty.sm, marginLeft: 4 },
+    answerBlock: {
+      marginTop: 24, padding: "20px 22px", borderRadius: 14,
+      border: `1px solid ${t.border}`, background: t.card,
     },
-    results: {
-      flex: 1,
-      overflowY: "auto",
-      display: "flex",
-      flexDirection: "column",
-      gap: 12,
-      paddingRight: 6,
-      minHeight: 140,
+    answerHeader: { marginBottom: 12 },
+    answerLabel: {
+      fontSize: ty.xs, fontWeight: 700,
+      letterSpacing: "0.07em", textTransform: "uppercase",
     },
-    hint: {
-      fontSize: ty.sm,
-      color: t.body,
-      margin: 0,
-      lineHeight: 1.6,
+    answerText: {
+      fontSize: ty.base, lineHeight: 1.75, margin: 0,
+      whiteSpace: "pre-wrap", wordBreak: "break-word",
     },
-    resultCard: {
-      padding: "16px 18px",
-      borderRadius: 12,
-      border: `1px solid ${t.border}`,
-      background: t.card,
+    sourcesSection: { marginTop: 18 },
+    sourcesLabel: {
+      fontSize: ty.xs, fontWeight: 700,
+      letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 10,
     },
-    resultMeta: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 10,
-      alignItems: "center",
-      marginBottom: 10,
+    sourcesList: { display: "flex", flexDirection: "column", gap: 10 },
+    sourceCard: {
+      padding: "14px 16px", borderRadius: 10, border: "1px solid",
+    },
+    sourceMeta: {
+      display: "flex", flexWrap: "wrap", gap: 8,
+      alignItems: "center", marginBottom: 8,
+    },
+    sourceNum: {
+      fontSize: ty.xs, fontWeight: 700,
+      width: 22, height: 22, borderRadius: "50%",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      flexShrink: 0,
     },
     badge: {
-      fontSize: ty.xs,
-      fontWeight: 700,
-      textTransform: "uppercase",
-      letterSpacing: "0.06em",
-      color: t.accent,
-      padding: "2px 8px",
-      borderRadius: 6,
-      background: t.chipActive,
+      fontSize: ty.xs, fontWeight: 700, textTransform: "uppercase",
+      letterSpacing: "0.06em", padding: "2px 8px", borderRadius: 6,
     },
     fileTag: {
-      fontSize: ty.sm,
-      fontWeight: 600,
-      color: t.muted,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-      maxWidth: "100%",
+      fontSize: ty.sm, fontWeight: 600,
+      overflow: "hidden", textOverflow: "ellipsis",
+      whiteSpace: "nowrap", maxWidth: "100%",
     },
-    resultText: {
-      fontSize: ty.base,
-      color: t.body,
-      margin: 0,
-      lineHeight: 1.7,
-      whiteSpace: "pre-wrap",
-      wordBreak: "break-word",
+    sourceText: {
+      fontSize: ty.sm, margin: 0, lineHeight: 1.65,
+      whiteSpace: "pre-wrap", wordBreak: "break-word",
     },
   };
 }
