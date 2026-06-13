@@ -61,7 +61,15 @@ export const embedChunks = async (chunks) => {
       }
     });
 
-    proc.stdin.write(JSON.stringify(chunks), "utf8");
-    proc.stdin.end();
+    const payload = JSON.stringify(chunks);
+    const writeStdin = () => {
+      const ok = proc.stdin.write(payload, "utf8");
+      if (ok) {
+        proc.stdin.end();
+        return;
+      }
+      proc.stdin.once("drain", () => proc.stdin.end());
+    };
+    writeStdin();
   });
 };

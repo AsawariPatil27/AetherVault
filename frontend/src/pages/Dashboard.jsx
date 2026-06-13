@@ -6,7 +6,7 @@ import { logout } from "../services/auth";
 import { supabase } from "../services/supabase";
 import ChatFilesPanel from "../components/ChatFilesPanel";
 import ChatQueryPanel from "../components/ChatQueryPanel";
-import { dashboardTokens } from "../dashboardTokens";
+import { dashboardTokens, dashboardType } from "../dashboardTokens";
 
 const API_BASE = "http://localhost:5000";
 const THEME_KEY = "aethervault-theme";
@@ -16,6 +16,18 @@ async function getAuthHeaders() {
   const token = data?.session?.access_token;
   if (!token) return null;
   return { Authorization: `Bearer ${token}` };
+}
+
+/** Mongo/API ids may be string or object — normalize for comparisons */
+function normalizeChatId(id) {
+  if (id == null) return "";
+  if (typeof id === "object" && id.$oid) return String(id.$oid);
+  return String(id);
+}
+
+function normalizeChat(chat) {
+  if (!chat) return chat;
+  return { ...chat, _id: normalizeChatId(chat._id) };
 }
 
 export default function Dashboard() {
@@ -54,6 +66,7 @@ export default function Dashboard() {
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   const fetchChats = async () => {
     try {
@@ -61,7 +74,14 @@ export default function Dashboard() {
       const headers = await getAuthHeaders();
       if (!headers) return;
       const res = await axios.get(`${API_BASE}/chat`, { headers });
-      setChats(res.data.chats || []);
+      const list = (res.data.chats || []).map(normalizeChat);
+      setChats(list);
+      setActiveChatId((current) => {
+        const cur = normalizeChatId(current);
+        if (!cur) return null;
+        if (list.some((c) => normalizeChatId(c._id) === cur)) return cur;
+        return list.length ? normalizeChatId(list[0]._id) : null;
+      });
     } catch (err) {
       console.error("Failed to fetch chats:", err);
     } finally {
@@ -75,13 +95,14 @@ export default function Dashboard() {
       const headers = await getAuthHeaders();
       if (!headers) return;
       const res = await axios.post(`${API_BASE}/chat`, {}, { headers });
+      const newId = normalizeChatId(res.data.chatId);
       const newChat = {
-        _id: res.data.chatId,
+        _id: newId,
         title: "New Chat",
         createdAt: new Date().toISOString(),
       };
       setChats((prev) => [newChat, ...prev]);
-      setActiveChatId(res.data.chatId);
+      setActiveChatId(newId);
     } catch (err) {
       console.error("Failed to create chat:", err);
     } finally {
@@ -95,7 +116,9 @@ export default function Dashboard() {
   };
 
   const openRename = () => {
-    const chat = chats.find((c) => c._id === activeChatId);
+    const chat = chats.find(
+      (c) => normalizeChatId(c._id) === normalizeChatId(activeChatId)
+    );
     setRenameDraft(chat?.title || "New Chat");
     setRenameOpen(true);
   };
@@ -108,8 +131,9 @@ export default function Dashboard() {
       const headers = await getAuthHeaders();
       if (!headers) return;
       await axios.patch(`${API_BASE}/chat/${activeChatId}`, { title }, { headers });
+      const id = normalizeChatId(activeChatId);
       setChats((prev) =>
-        prev.map((c) => (c._id === activeChatId ? { ...c, title } : c))
+        prev.map((c) => (normalizeChatId(c._id) === id ? { ...c, title } : c))
       );
       setRenameOpen(false);
     } catch (err) {
@@ -120,16 +144,34 @@ export default function Dashboard() {
   };
 
   const handleConfirmDelete = async () => {
-    if (!activeChatId) return;
+    const deletedId = normalizeChatId(activeChatId);
+    if (!deletedId) return;
+
     try {
       setDeleting(true);
+      setDeleteError(null);
       const headers = await getAuthHeaders();
-      if (!headers) return;
-      await axios.delete(`${API_BASE}/chat/${activeChatId}`, { headers });
-      setActiveChatId(null);
+      if (!headers) {
+        setDeleteError("Not signed in.");
+        return;
+      }
+
+      await axios.delete(`${API_BASE}/chat/${deletedId}`, { headers });
+
+      const nextChats = chats.filter(
+        (c) => normalizeChatId(c._id) !== deletedId
+      );
+      setChats(nextChats);
+      setActiveChatId(
+        nextChats.length ? normalizeChatId(nextChats[0]._id) : null
+      );
       setDeleteConfirmOpen(false);
-      await fetchChats();
+
+      fetchChats().catch((err) => console.error("Refresh chats failed:", err));
     } catch (err) {
+      const msg =
+        err.response?.data?.error || err.message || "Failed to delete chat";
+      setDeleteError(msg);
       console.error("Delete chat failed:", err);
     } finally {
       setDeleting(false);
@@ -156,7 +198,8 @@ export default function Dashboard() {
     return null;
   }
 
-  const activeChat = chats.find((c) => c._id === activeChatId);
+  const activeId = normalizeChatId(activeChatId);
+  const activeChat = chats.find((c) => normalizeChatId(c._id) === activeId);
 
   return (
     <div style={{ ...styles.root, background: t.bg, color: t.text }}>
@@ -179,7 +222,7 @@ export default function Dashboard() {
             style={{
               ...styles.newChatBtn,
               borderColor: t.borderMuted,
-              color: t.muted,
+              color: t.text,
             }}
             onClick={handleCreateChat}
             disabled={creating}
@@ -190,24 +233,26 @@ export default function Dashboard() {
             {creating ? "Creating…" : "New Chat"}
           </button>
 
-          <div style={{ ...styles.chatListLabel, color: t.dim }}>RECENT</div>
+          <div style={{ ...styles.chatListLabel, color: t.label }}>RECENT</div>
           <div style={styles.chatList}>
             {fetchingChats ? (
               <p style={{ ...styles.dimText, color: t.dim }}>Loading…</p>
             ) : chats.length === 0 ? (
               <p style={{ ...styles.dimText, color: t.dim }}>No chats yet.</p>
             ) : (
-              chats.map((chat) => (
+              chats.map((chat) => {
+                const chatId = normalizeChatId(chat._id);
+                return (
                 <button
-                  key={chat._id}
+                  key={chatId}
                   type="button"
                   style={{
                     ...styles.chatItem,
-                    ...(activeChatId === chat._id
+                    ...(activeId === chatId
                       ? { ...styles.chatItemActive, background: t.chipActive, color: t.text }
-                      : { color: t.muted }),
+                      : { color: t.body }),
                   }}
-                  onClick={() => setActiveChatId(chat._id)}
+                  onClick={() => setActiveChatId(chatId)}
                 >
                   <span style={styles.chatItemIcon}>
                     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
@@ -220,14 +265,15 @@ export default function Dashboard() {
                     </svg>
                   </span>
                   <span style={styles.chatItemTitle}>{chat.title || "New Chat"}</span>
-                  <span style={{ ...styles.chatItemDate, opacity: 0.45 }}>
+                  <span style={{ ...styles.chatItemDate, color: t.dim }}>
                     {new Date(chat.createdAt).toLocaleDateString("en-IN", {
                       day: "numeric",
                       month: "short",
                     })}
                   </span>
                 </button>
-              ))
+              );
+              })
             )}
           </div>
 
@@ -303,12 +349,18 @@ export default function Dashboard() {
           </button>
 
           <div style={styles.titleRow}>
-            <span style={{ ...styles.chatTitle, color: t.muted }}>
+            <span style={{ ...styles.chatTitle, color: t.text }}>
               {activeChat ? activeChat.title || "New Chat" : "Select or create a chat"}
             </span>
             {activeChat && (
               <>
-                <button type="button" style={{ ...styles.iconBtn, color: t.dim }} title="Rename chat" onClick={openRename}>
+                <button
+                  type="button"
+                  className="icon-btn-hover"
+                  style={{ ...styles.iconBtn, color: t.muted }}
+                  title="Rename chat"
+                  onClick={openRename}
+                >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                     <path
                       d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4 12.5-12.5z"
@@ -321,17 +373,40 @@ export default function Dashboard() {
                 </button>
                 <button
                   type="button"
-                  style={{ ...styles.iconBtn, color: "#f87171" }}
+                  className="delete-chat-btn icon-btn-hover"
+                  style={{ ...styles.iconBtn, color: t.muted }}
                   title="Delete chat"
-                  onClick={() => setDeleteConfirmOpen(true)}
+                  onClick={() => {
+                    setDeleteError(null);
+                    setDeleteConfirmOpen(true);
+                  }}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
                     <path
-                      d="M4 7h16M10 11v6M14 11v6M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8 7h8l-1 14a1 1 0 0 1-1 1H10a1 1 0 0 1-1-1L8 7z"
+                      d="M4 7h16"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M9 7V5.2a1.2 1.2 0 0 1 1.2-1.2h3.6a1.2 1.2 0 0 1 1.2 1.2V7"
                       stroke="currentColor"
                       strokeWidth="1.5"
                       strokeLinecap="round"
                       strokeLinejoin="round"
+                    />
+                    <path
+                      d="M7 7l.65 11.1c.08 1.2 1.1 2.15 2.3 2.15h4.1c1.2 0 2.22-.95 2.3-2.15L17 7"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M10 11v5.5M14 11v5.5"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
                     />
                   </svg>
                 </button>
@@ -356,10 +431,10 @@ export default function Dashboard() {
         </header>
 
         <div style={{ ...styles.body, background: t.mainBg }}>
-          {activeChatId ? (
+          {activeId ? (
             <div style={styles.workspaceRow}>
               <div style={styles.centerCol}>
-                <ChatQueryPanel chatId={activeChatId} t={t} />
+                <ChatQueryPanel key={activeId} chatId={activeId} t={t} />
               </div>
               <div
                 style={{
@@ -368,7 +443,12 @@ export default function Dashboard() {
                   background: t.sidebarBg,
                 }}
               >
-                <ChatFilesPanel chatId={activeChatId} t={t} onUploadDone={fetchChats} />
+                <ChatFilesPanel
+                  key={activeId}
+                  chatId={activeId}
+                  t={t}
+                  onUploadDone={fetchChats}
+                />
               </div>
             </div>
           ) : (
@@ -384,8 +464,8 @@ export default function Dashboard() {
                   />
                 </svg>
               </div>
-              <h2 style={{ ...styles.emptyTitle, color: t.dim }}>No chat selected</h2>
-              <p style={{ ...styles.emptySubtitle, color: t.dim }}>
+              <h2 style={{ ...styles.emptyTitle, color: t.text }}>No chat selected</h2>
+              <p style={{ ...styles.emptySubtitle, color: t.body }}>
                 Create a new chat or pick one from the sidebar to search and upload documents.
               </p>
               <button
@@ -461,10 +541,15 @@ export default function Dashboard() {
             onClick={(e) => e.stopPropagation()}
           >
             <h4 style={{ ...styles.modalTitle, color: t.text }}>Delete this chat?</h4>
-            <p style={{ ...styles.modalBody, color: t.muted }}>
+            <p style={{ ...styles.modalBody, color: t.body }}>
               This will remove <strong style={{ color: t.text }}>{activeChat.title || "this chat"}</strong> and all
               uploaded files and search data for it. This cannot be undone.
             </p>
+            {deleteError && (
+              <p style={{ ...styles.modalBody, color: "#f87171", marginTop: 0 }}>
+                {deleteError}
+              </p>
+            )}
             <div style={styles.modalActions}>
               <button
                 type="button"
@@ -493,11 +578,14 @@ export default function Dashboard() {
 }
 
 function buildStyles() {
+  const ty = dashboardType;
   return {
     root: {
       display: "flex",
       height: "100vh",
-      fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
+      fontFamily: "'DM Sans', 'Segoe UI', system-ui, sans-serif",
+      fontSize: ty.base,
+      lineHeight: 1.5,
       overflow: "hidden",
     },
     sidebar: {
@@ -529,30 +617,29 @@ function buildStyles() {
       boxShadow: "0 0 8px #6c6cff80",
     },
     brandName: {
-      fontSize: 17,
+      fontSize: ty.lg,
       fontWeight: 700,
-      letterSpacing: "0.04em",
+      letterSpacing: "-0.02em",
     },
     newChatBtn: {
       margin: "14px 14px 6px",
       display: "flex",
       alignItems: "center",
       gap: 8,
-      padding: "10px 14px",
+      padding: "11px 14px",
       borderRadius: 10,
       border: "1px solid",
       background: "transparent",
-      fontSize: 13,
+      fontSize: ty.sm,
       fontWeight: 600,
       cursor: "pointer",
       transition: "all 0.15s",
-      letterSpacing: "0.02em",
     },
     chatListLabel: {
-      padding: "14px 20px 6px",
-      fontSize: 10,
+      padding: "14px 20px 8px",
+      fontSize: ty.xs,
       fontWeight: 700,
-      letterSpacing: "0.12em",
+      letterSpacing: "0.08em",
     },
     chatList: {
       flex: 1,
@@ -563,16 +650,17 @@ function buildStyles() {
       width: "100%",
       display: "flex",
       alignItems: "center",
-      gap: 8,
-      padding: "9px 12px",
-      borderRadius: 8,
+      gap: 10,
+      padding: "10px 12px",
+      borderRadius: 10,
       border: "none",
       background: "transparent",
-      fontSize: 13,
+      fontSize: ty.sm,
+      fontWeight: 500,
       cursor: "pointer",
       textAlign: "left",
       transition: "background 0.12s, color 0.12s",
-      marginBottom: 2,
+      marginBottom: 4,
     },
     chatItemActive: {},
     chatItemIcon: {
@@ -584,10 +672,12 @@ function buildStyles() {
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap",
+      lineHeight: 1.35,
     },
     chatItemDate: {
-      fontSize: 10,
+      fontSize: ty.xs,
       flexShrink: 0,
+      fontWeight: 500,
     },
     userFooter: {
       display: "flex",
@@ -627,7 +717,8 @@ function buildStyles() {
     },
     userEmail: {
       display: "block",
-      fontSize: 11,
+      fontSize: ty.xs,
+      fontWeight: 500,
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap",
@@ -642,8 +733,9 @@ function buildStyles() {
       transition: "color 0.12s",
     },
     dimText: {
-      fontSize: 12,
+      fontSize: ty.sm,
       padding: "12px 12px",
+      lineHeight: 1.5,
     },
 
     main: {
@@ -657,8 +749,8 @@ function buildStyles() {
       display: "flex",
       alignItems: "center",
       gap: 14,
-      padding: "0 20px",
-      height: 60,
+      padding: "0 24px",
+      height: 64,
       borderBottom: "1px solid",
       flexShrink: 0,
     },
@@ -677,13 +769,14 @@ function buildStyles() {
       minWidth: 0,
     },
     chatTitle: {
-      fontSize: 14,
-      fontWeight: 600,
-      letterSpacing: "0.01em",
+      fontSize: ty.md,
+      fontWeight: 700,
+      letterSpacing: "-0.02em",
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap",
-      maxWidth: "min(40vw, 420px)",
+      maxWidth: "min(40vw, 480px)",
+      lineHeight: 1.3,
     },
     iconBtn: {
       background: "none",
@@ -697,9 +790,9 @@ function buildStyles() {
     },
     topbarSpacer: { flex: 1 },
     themeToggle: {
-      fontSize: 12,
+      fontSize: ty.sm,
       fontWeight: 600,
-      padding: "8px 14px",
+      padding: "9px 16px",
       borderRadius: 10,
       border: "1px solid",
       cursor: "pointer",
@@ -709,7 +802,7 @@ function buildStyles() {
     body: {
       flex: 1,
       overflow: "auto",
-      padding: "24px 24px 28px",
+      padding: "28px 32px 32px",
       minHeight: 0,
     },
     workspaceRow: {
@@ -718,23 +811,27 @@ function buildStyles() {
       alignItems: "stretch",
       gap: 0,
       height: "100%",
-      minHeight: "min(70vh, 720px)",
-      maxWidth: 1200,
+      minHeight: "min(72vh, 780px)",
+      maxWidth: 1360,
       margin: "0 auto",
     },
     centerCol: {
       flex: 1,
       minWidth: 0,
-      paddingRight: 24,
+      paddingRight: 32,
       display: "flex",
       flexDirection: "column",
     },
     rightCol: {
-      width: 320,
+      width: 360,
       flexShrink: 0,
       borderLeft: "1px solid",
-      paddingLeft: 24,
+      paddingLeft: 32,
       paddingBottom: 8,
+      display: "flex",
+      flexDirection: "column",
+      minHeight: 0,
+      overflow: "hidden",
     },
 
     emptyState: {
@@ -752,24 +849,25 @@ function buildStyles() {
       opacity: 0.85,
     },
     emptyTitle: {
-      fontSize: 20,
+      fontSize: ty.xl,
       fontWeight: 700,
       margin: 0,
+      letterSpacing: "-0.03em",
     },
     emptySubtitle: {
-      fontSize: 13,
-      maxWidth: 340,
-      lineHeight: 1.7,
+      fontSize: ty.base,
+      maxWidth: 400,
+      lineHeight: 1.65,
       margin: 0,
     },
     emptyBtn: {
       marginTop: 8,
-      padding: "10px 22px",
+      padding: "12px 24px",
       borderRadius: 10,
       border: "none",
       background: "linear-gradient(135deg, #6c6cff, #a78bfa)",
       color: "#fff",
-      fontSize: 13,
+      fontSize: ty.sm,
       fontWeight: 700,
       cursor: "pointer",
       boxShadow: "0 4px 20px #6c6cff40",
@@ -784,7 +882,7 @@ function buildStyles() {
       gap: 16,
     },
     loadingText: {
-      fontSize: 14,
+      fontSize: ty.base,
     },
     spinner: {
       width: 28,
@@ -814,23 +912,25 @@ function buildStyles() {
       boxShadow: "0 24px 48px rgba(0,0,0,0.35)",
     },
     modalTitle: {
-      fontSize: 16,
+      fontSize: ty.lg,
       fontWeight: 700,
-      marginBottom: 14,
+      marginBottom: 12,
+      letterSpacing: "-0.02em",
     },
     modalBody: {
-      fontSize: 13,
+      fontSize: ty.base,
       lineHeight: 1.65,
-      marginBottom: 18,
+      marginBottom: 20,
     },
     modalInput: {
       width: "100%",
-      padding: "11px 12px",
+      padding: "12px 14px",
       borderRadius: 10,
       border: "1px solid",
-      fontSize: 14,
+      fontSize: ty.base,
       marginBottom: 18,
       outline: "none",
+      lineHeight: 1.45,
     },
     modalActions: {
       display: "flex",
@@ -838,31 +938,31 @@ function buildStyles() {
       gap: 10,
     },
     modalBtnGhost: {
-      padding: "9px 16px",
+      padding: "10px 18px",
       borderRadius: 10,
       border: "1px solid",
       background: "transparent",
-      fontSize: 13,
+      fontSize: ty.sm,
       fontWeight: 600,
       cursor: "pointer",
     },
     modalBtnPrimary: {
-      padding: "9px 18px",
+      padding: "10px 20px",
       borderRadius: 10,
       border: "none",
       background: "linear-gradient(135deg, #6c6cff, #a78bfa)",
       color: "#fff",
-      fontSize: 13,
+      fontSize: ty.sm,
       fontWeight: 700,
       cursor: "pointer",
     },
     modalBtnDanger: {
-      padding: "9px 18px",
+      padding: "10px 20px",
       borderRadius: 10,
       border: "none",
       background: "#b91c1c",
       color: "#fff",
-      fontSize: 13,
+      fontSize: ty.sm,
       fontWeight: 700,
       cursor: "pointer",
     },
@@ -873,12 +973,24 @@ function globalStyles(t) {
   return `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: ${t.scrollThumb}; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb { background: ${t.scrollThumb}; border-radius: 8px; }
+  textarea::placeholder, input::placeholder { color: ${t.dim}; opacity: 1; }
+  textarea:focus-visible, input:focus-visible {
+    outline: 2px solid ${t.accent};
+    outline-offset: 2px;
+  }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  button:hover:not(:disabled) { opacity: 0.88; }
-  button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .delete-chat-btn:hover {
+    opacity: 1 !important;
+    background: ${t.errBg};
+    color: ${t.errText};
+  }
+  .delete-chat-btn:active { transform: scale(0.94); }
+  .icon-btn-hover:hover { background: ${t.chipActive}; opacity: 1 !important; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
 `;
 }

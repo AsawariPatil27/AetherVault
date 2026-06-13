@@ -1,5 +1,6 @@
 import axios from "axios";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { stripLoneSurrogates } from "../../utils/textSanitize.js";
 
 export const parsePdf = async (fileUrl) => {
   try {
@@ -31,11 +32,13 @@ export const parsePdf = async (fileUrl) => {
       text += pageText + "\n\n";
     }
 
-    // ✅ Final cleanup
-    return text
-      .replace(/\s+/g, " ")   // normalize spaces
-      .replace(/\n\s+/g, "\n")
-      .trim();
+    // ✅ Final cleanup (strip lone surrogates from PDF.js before embed/tokenize)
+    return stripLoneSurrogates(
+      text
+        .replace(/\s+/g, " ") // normalize spaces
+        .replace(/\n\s+/g, "\n")
+        .trim()
+    );
 
   } catch (error) {
     console.error("PDF parsing error:", error);

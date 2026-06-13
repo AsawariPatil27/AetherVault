@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { supabase } from "../services/supabase";
+import { dashboardType } from "../dashboardTokens";
 
+const ty = dashboardType;
 const API_BASE = "http://localhost:5000";
+
+const ACCEPT = ".pdf,image/*,audio/*,video/*";
 
 async function getAuthHeaders() {
   const { data } = await supabase.auth.getSession();
@@ -11,16 +15,101 @@ async function getAuthHeaders() {
   return { Authorization: `Bearer ${token}` };
 }
 
-/**
- * Right column: upload files for the chat + list uploaded documents from the backend.
- */
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function mimeToKind(mime) {
+  if (mime === "application/pdf") return "pdf";
+  if (mime?.startsWith("image/")) return "image";
+  if (mime?.startsWith("audio/")) return "audio";
+  if (mime?.startsWith("video/")) return "video";
+  return "file";
+}
+
+function kindFromDocType(fileType) {
+  if (["pdf", "image", "audio", "video"].includes(fileType)) return fileType;
+  return "file";
+}
+
+function TypeIcon({ kind, color }) {
+  const stroke = color;
+  const common = {
+    width: 20,
+    height: 20,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    "aria-hidden": true,
+  };
+  if (kind === "pdf") {
+    return (
+      <svg {...common}>
+        <path
+          d="M8 3h6l4 4v14a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"
+          stroke={stroke}
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+        <path d="M14 3v4h4M9 13h6M9 17h4" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (kind === "image") {
+    return (
+      <svg {...common}>
+        <rect x="4" y="5" width="16" height="14" rx="2" stroke={stroke} strokeWidth="1.5" />
+        <circle cx="9" cy="10" r="1.5" fill={stroke} />
+        <path d="M4 17l4.5-4.5 3 3L20 9v10H4v-2z" stroke={stroke} strokeWidth="1.5" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (kind === "audio") {
+    return (
+      <svg {...common}>
+        <path
+          d="M11 5v11.5a3 3 0 1 1-2-2.83M11 5l4-2v6"
+          stroke={stroke}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === "video") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="6" width="18" height="12" rx="2" stroke={stroke} strokeWidth="1.5" />
+        <path d="M10 10l5 3-5 3V10z" fill={stroke} />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path
+        d="M8 4h8l4 4v12H8V4z"
+        stroke={stroke}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export default function ChatFilesPanel({ chatId, t, onUploadDone }) {
+  const inputRef = useRef(null);
+  const dragDepth = useRef(0);
+
   const [pendingFiles, setPendingFiles] = useState([]);
   const [documents, setDocuments] = useState([]);
   const [loadingList, setLoadingList] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState(null);
   const [dragging, setDragging] = useState(false);
+
+  const styles = buildStyles(t);
 
   const fetchDocuments = useCallback(async () => {
     if (!chatId) return;
@@ -38,20 +127,54 @@ export default function ChatFilesPanel({ chatId, t, onUploadDone }) {
   }, [chatId]);
 
   useEffect(() => {
+    setPendingFiles([]);
+    setStatus(null);
+    setDocuments([]);
     fetchDocuments();
-  }, [fetchDocuments]);
+  }, [chatId, fetchDocuments]);
 
-  const handleFileChange = (e) => {
-    const selected = Array.from(e.target.files);
-    setPendingFiles(selected);
+  const addFiles = (fileList) => {
+    const incoming = Array.from(fileList || []);
+    if (!incoming.length) return;
+    setPendingFiles((prev) => [...prev, ...incoming]);
     setStatus(null);
   };
 
+  const handleFileChange = (e) => {
+    addFiles(e.target.files);
+    e.target.value = "";
+  };
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0;
+      setDragging(false);
+    }
+  };
+
+  const handleDragOver = (e) => e.preventDefault();
+
   const handleDrop = (e) => {
     e.preventDefault();
+    dragDepth.current = 0;
     setDragging(false);
-    const dropped = Array.from(e.dataTransfer.files);
-    setPendingFiles(dropped);
+    addFiles(e.dataTransfer.files);
+  };
+
+  const removePending = (index) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const clearPending = () => {
+    setPendingFiles([]);
     setStatus(null);
   };
 
@@ -78,7 +201,7 @@ export default function ChatFilesPanel({ chatId, t, onUploadDone }) {
       await axios.post(`${API_BASE}/upload`, formData, { headers });
       setStatus({
         type: "success",
-        message: `${pendingFiles.length} file${pendingFiles.length > 1 ? "s" : ""} uploaded.`,
+        message: `${pendingFiles.length} file${pendingFiles.length > 1 ? "s" : ""} uploaded. Processing in background.`,
       });
       setPendingFiles([]);
       await fetchDocuments();
@@ -91,286 +214,437 @@ export default function ChatFilesPanel({ chatId, t, onUploadDone }) {
     }
   };
 
-  const removePending = (index) => {
-    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const styles = buildStyles(t);
+  const openFilePicker = () => inputRef.current?.click();
 
   return (
     <div style={styles.root}>
-      <h3 style={styles.heading}>Files</h3>
-      <p style={styles.sub}>Upload PDFs, images, audio, or video for this chat.</p>
+      <header style={styles.panelHeader}>
+        <h3 style={styles.heading}>Files</h3>
+        <p style={styles.sub}>Add sources to this chat — PDF, image, audio, or video.</p>
+      </header>
 
-      <div
-        style={{
-          ...styles.dropZone,
-          ...(dragging ? styles.dropZoneActive : {}),
-          ...(pendingFiles.length > 0 ? styles.dropZoneFilled : {}),
-        }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={handleDrop}
-        onClick={() => document.getElementById("chat-file-input")?.click()}
-      >
-        <input
-          id="chat-file-input"
-          type="file"
-          multiple
-          accept=".pdf,image/*,audio/*,video/*"
-          onChange={handleFileChange}
-          style={{ display: "none" }}
-        />
-        {pendingFiles.length === 0 ? (
-          <>
-            <div style={styles.uploadIcon}>
-              <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-                <path
-                  d="M16 22V10M10 16l6-6 6 6"
-                  stroke={t.accent}
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <rect
-                  x="4"
-                  y="4"
-                  width="24"
-                  height="24"
-                  rx="8"
-                  stroke={t.borderMuted}
-                  strokeWidth="1.5"
-                />
-              </svg>
-            </div>
-            <p style={styles.dropText}>{dragging ? "Drop files here" : "Drag & drop or click"}</p>
-            <p style={styles.dropHint}>PDF, image, audio, video</p>
-          </>
-        ) : (
-          <div style={styles.fileList} onClick={(e) => e.stopPropagation()}>
-            {pendingFiles.map((f, i) => (
-              <div key={i} style={styles.fileRow}>
-                <span style={styles.fileIcon}>{fileIcon(f.type)}</span>
-                <span style={styles.fileName}>{f.name}</span>
-                <span style={styles.fileSize}>{formatSize(f.size)}</span>
-                <button type="button" style={styles.removeBtn} onClick={() => removePending(i)}>
-                  ✕
-                </button>
-              </div>
-            ))}
-            <p style={styles.addMoreHint}>Click area to add more</p>
-          </div>
-        )}
-      </div>
-
-      <button
-        type="button"
-        style={{
-          ...styles.uploadBtn,
-          ...(loading || !pendingFiles.length ? styles.uploadBtnDisabled : {}),
-        }}
-        onClick={handleUpload}
-        disabled={loading || !pendingFiles.length}
-      >
-        {loading ? <span style={styles.btnSpinner} /> : null}
-        {loading ? "Uploading…" : pendingFiles.length ? `Upload (${pendingFiles.length})` : "Upload"}
-      </button>
-
-      {status && (
+      <section style={styles.uploadCard}>
         <div
           style={{
-            ...styles.statusMsg,
-            ...(status.type === "success" ? styles.statusSuccess : styles.statusError),
+            ...styles.dropZone,
+            ...(dragging ? styles.dropZoneActive : {}),
+          }}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+          onClick={openFilePicker}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openFilePicker();
+            }
           }}
         >
-          {status.type === "success" ? "✓" : "✕"} {status.message}
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            accept={ACCEPT}
+            onChange={handleFileChange}
+            style={{ display: "none" }}
+          />
+          <div style={styles.dropIconWrap}>
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="M12 16V8m0 0l-3 3m3-3 3 3"
+                stroke={t.accent}
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"
+                stroke={t.muted}
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+          <p style={styles.dropTitle}>
+            {dragging ? "Drop to add files" : "Choose files or drag here"}
+          </p>
+          <p style={styles.dropHint}>PDF · Images · Audio · Video</p>
         </div>
-      )}
 
-      <div style={styles.listSection}>
+        {pendingFiles.length > 0 && (
+          <div style={styles.queueSection}>
+            <div style={styles.queueHeader}>
+              <span style={styles.queueTitle}>
+                Ready to upload
+                <span style={styles.queueCount}>{pendingFiles.length}</span>
+              </span>
+              <button type="button" style={styles.clearLink} onClick={clearPending}>
+                Clear all
+              </button>
+            </div>
+            <ul style={styles.queueList}>
+              {pendingFiles.map((f, i) => {
+                const kind = mimeToKind(f.type);
+                return (
+                  <li key={`${f.name}-${f.size}-${i}`} style={styles.queueItem}>
+                    <div style={{ ...styles.queueIcon, background: t.chipActive }}>
+                      <TypeIcon kind={kind} color={t.accent} />
+                    </div>
+                    <div style={styles.queueMeta}>
+                      <span style={styles.queueName} title={f.name}>
+                        {f.name}
+                      </span>
+                      <span style={styles.queueSize}>{formatSize(f.size)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      style={styles.removeBtn}
+                      title="Remove"
+                      onClick={() => removePending(i)}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                        <path
+                          d="M6 6l12 12M18 6L6 18"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <button
+              type="button"
+              style={styles.addMoreBtn}
+              onClick={openFilePicker}
+            >
+              + Add more files
+            </button>
+          </div>
+        )}
+
+        <button
+          type="button"
+          style={{
+            ...styles.uploadBtn,
+            ...(loading || !pendingFiles.length ? styles.uploadBtnDisabled : {}),
+          }}
+          onClick={handleUpload}
+          disabled={loading || !pendingFiles.length}
+        >
+          {loading && <span style={styles.btnSpinner} />}
+          {loading
+            ? "Uploading…"
+            : pendingFiles.length
+              ? `Upload ${pendingFiles.length} file${pendingFiles.length > 1 ? "s" : ""}`
+              : "Select files to upload"}
+        </button>
+
+        {status && (
+          <div
+            style={{
+              ...styles.statusMsg,
+              ...(status.type === "success" ? styles.statusSuccess : styles.statusError),
+            }}
+          >
+            {status.message}
+          </div>
+        )}
+      </section>
+
+      <section style={styles.listSection}>
         <div style={styles.listHeader}>
-          <span style={styles.listTitle}>In this chat</span>
-          {loadingList && <span style={styles.listHint}>Refreshing…</span>}
+          <span style={styles.listTitle}>Uploaded</span>
+          <span style={styles.listBadge}>
+            {loadingList ? "…" : documents.length}
+          </span>
         </div>
-        {documents.length === 0 && !loadingList ? (
-          <p style={styles.emptyDocs}>No files uploaded yet.</p>
+
+        {loadingList && documents.length === 0 ? (
+          <p style={styles.emptyDocs}>Loading files…</p>
+        ) : documents.length === 0 ? (
+          <div style={styles.emptyBlock}>
+            <div style={{ ...styles.emptyIconWrap, background: t.chipActive }}>
+              <TypeIcon kind="file" color={t.muted} />
+            </div>
+            <p style={styles.emptyTitle}>No files yet</p>
+            <p style={styles.emptyDocs}>Upload documents above to use them in search.</p>
+          </div>
         ) : (
           <ul style={styles.docList}>
-            {documents.map((d) => (
-              <li key={d._id} style={styles.docRow}>
-                <span style={styles.docIcon}>{fileTypeLabel(d.fileType)}</span>
-                <div style={styles.docMeta}>
-                  <span style={styles.docName}>{d.fileName}</span>
-                  <span style={styles.docDate}>
-                    {new Date(d.createdAt).toLocaleString(undefined, {
-                      dateStyle: "short",
-                      timeStyle: "short",
-                    })}
-                  </span>
-                </div>
-              </li>
-            ))}
+            {documents.map((d) => {
+              const kind = kindFromDocType(d.fileType);
+              return (
+                <li key={d._id} style={styles.docRow}>
+                  <div style={{ ...styles.docIconWrap, background: t.chipActive }}>
+                    <TypeIcon kind={kind} color={t.accent} />
+                  </div>
+                  <div style={styles.docMeta}>
+                    <span style={styles.docName} title={d.fileName}>
+                      {d.fileName}
+                    </span>
+                    <div style={styles.docFooter}>
+                      <span style={{ ...styles.typePill, ...styles[`pill_${kind}`] }}>
+                        {kind.toUpperCase()}
+                      </span>
+                      <span style={styles.docDate}>
+                        {new Date(d.createdAt).toLocaleString(undefined, {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / 1024 / 1024).toFixed(1) + " MB";
-}
-
-function fileIcon(mime) {
-  if (mime === "application/pdf") return "📄";
-  if (mime.startsWith("image/")) return "🖼️";
-  if (mime.startsWith("audio/")) return "🎵";
-  if (mime.startsWith("video/")) return "🎬";
-  return "📁";
-}
-
-function fileTypeLabel(t) {
-  if (t === "pdf") return "📄";
-  if (t === "image") return "🖼️";
-  if (t === "audio") return "🎵";
-  if (t === "video") return "🎬";
-  return "📁";
-}
-
 function buildStyles(t) {
   return {
-    root: { width: "100%", minWidth: 0 },
+    root: {
+      width: "100%",
+      minWidth: 0,
+      display: "flex",
+      flexDirection: "column",
+      height: "100%",
+      maxHeight: "100%",
+    },
+    panelHeader: {
+      marginBottom: 16,
+      flexShrink: 0,
+    },
     heading: {
-      fontSize: 15,
+      fontSize: ty.lg,
       fontWeight: 700,
       color: t.text,
-      marginBottom: 4,
+      marginBottom: 6,
+      letterSpacing: "-0.02em",
     },
     sub: {
-      fontSize: 12,
-      color: t.dim,
-      marginBottom: 14,
+      fontSize: ty.sm,
+      color: t.body,
+      margin: 0,
       lineHeight: 1.55,
     },
+
+    uploadCard: {
+      flexShrink: 0,
+      padding: 16,
+      borderRadius: 14,
+      border: `1px solid ${t.border}`,
+      background: t.card,
+      display: "flex",
+      flexDirection: "column",
+      gap: 14,
+    },
     dropZone: {
-      border: `1.5px dashed ${t.borderMuted}`,
+      border: `2px dashed ${t.borderMuted}`,
       borderRadius: 12,
-      padding: "24px 16px",
+      padding: "22px 16px",
       display: "flex",
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
       cursor: "pointer",
-      background: t.card,
-      transition: "border-color 0.15s, background 0.15s",
-      minHeight: 120,
+      background: t.inputBg,
+      transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+      textAlign: "center",
       gap: 6,
     },
     dropZoneActive: {
       borderColor: t.accent,
       background: t.chipActive,
+      boxShadow: `0 0 0 3px ${t.accent}22`,
     },
-    dropZoneFilled: {
-      alignItems: "flex-start",
-      padding: "14px 14px",
+    dropIconWrap: {
+      width: 48,
+      height: 48,
+      borderRadius: 12,
+      background: t.chipActive,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 4,
     },
-    uploadIcon: { marginBottom: 2 },
-    dropText: {
-      fontSize: 13,
+    dropTitle: {
+      fontSize: ty.sm,
       fontWeight: 600,
-      color: t.muted,
+      color: t.text,
+      margin: 0,
     },
     dropHint: {
-      fontSize: 11,
-      color: t.dim,
+      fontSize: ty.xs,
+      color: t.muted,
+      margin: 0,
+      letterSpacing: "0.02em",
     },
-    fileList: {
-      width: "100%",
+
+    queueSection: {
       display: "flex",
       flexDirection: "column",
-      gap: 6,
+      gap: 10,
     },
-    fileRow: {
+    queueHeader: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+    },
+    queueTitle: {
+      fontSize: ty.xs,
+      fontWeight: 700,
+      letterSpacing: "0.06em",
+      textTransform: "uppercase",
+      color: t.label,
       display: "flex",
       alignItems: "center",
       gap: 8,
-      padding: "7px 10px",
-      background: t.inputBg,
-      borderRadius: 8,
-      border: `1px solid ${t.border}`,
     },
-    fileIcon: { fontSize: 14, flexShrink: 0 },
-    fileName: {
-      flex: 1,
-      fontSize: 11,
+    queueCount: {
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      minWidth: 20,
+      height: 20,
+      padding: "0 6px",
+      borderRadius: 999,
+      background: t.chipActive,
+      color: t.text,
+      fontSize: ty.xs,
+      letterSpacing: 0,
+      textTransform: "none",
+    },
+    clearLink: {
+      background: "none",
+      border: "none",
       color: t.muted,
+      fontSize: ty.xs,
+      fontWeight: 600,
+      cursor: "pointer",
+      padding: "4px 6px",
+      borderRadius: 6,
+    },
+    queueList: {
+      listStyle: "none",
+      margin: 0,
+      padding: 0,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 200,
+      overflowY: "auto",
+    },
+    queueItem: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      padding: "10px 12px",
+      borderRadius: 10,
+      border: `1px solid ${t.border}`,
+      background: t.inputBg,
+    },
+    queueIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 8,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
+    },
+    queueMeta: {
+      flex: 1,
+      minWidth: 0,
+      display: "flex",
+      flexDirection: "column",
+      gap: 2,
+    },
+    queueName: {
+      fontSize: ty.sm,
+      fontWeight: 600,
+      color: t.text,
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap",
     },
-    fileSize: {
-      fontSize: 10,
-      color: t.dim,
-      flexShrink: 0,
+    queueSize: {
+      fontSize: ty.xs,
+      color: t.muted,
+      fontWeight: 500,
     },
     removeBtn: {
-      background: "none",
-      border: "none",
-      color: t.dim,
-      cursor: "pointer",
-      fontSize: 11,
-      padding: "2px 4px",
       flexShrink: 0,
+      width: 32,
+      height: 32,
+      borderRadius: 8,
+      border: `1px solid ${t.border}`,
+      background: t.card,
+      color: t.muted,
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
     },
-    addMoreHint: {
-      fontSize: 10,
-      color: t.dim,
-      marginTop: 4,
-      textAlign: "center",
+    addMoreBtn: {
       width: "100%",
+      padding: "9px 12px",
+      borderRadius: 10,
+      border: `1px dashed ${t.borderMuted}`,
+      background: "transparent",
+      color: t.body,
+      fontSize: ty.sm,
+      fontWeight: 600,
+      cursor: "pointer",
     },
     uploadBtn: {
-      marginTop: 12,
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
       gap: 8,
-      padding: "10px 16px",
+      padding: "13px 18px",
       borderRadius: 10,
       border: "none",
       background: `linear-gradient(135deg, ${t.accent}, ${t.accentSoft})`,
       color: "#fff",
-      fontSize: 12,
+      fontSize: ty.sm,
       fontWeight: 700,
       cursor: "pointer",
       width: "100%",
-      boxShadow: `0 4px 16px ${t.accent}40`,
+      boxShadow: `0 4px 14px ${t.accent}35`,
     },
     uploadBtnDisabled: {
-      opacity: 0.4,
+      opacity: 0.45,
       cursor: "not-allowed",
       boxShadow: "none",
+      background: t.borderMuted,
+      color: t.muted,
     },
     btnSpinner: {
       display: "inline-block",
-      width: 12,
-      height: 12,
+      width: 14,
+      height: 14,
       borderRadius: "50%",
-      border: "2px solid rgba(255,255,255,0.3)",
+      border: "2px solid rgba(255,255,255,0.35)",
       borderTopColor: "#fff",
       animation: "spin 0.7s linear infinite",
     },
     statusMsg: {
-      marginTop: 10,
-      padding: "8px 12px",
-      borderRadius: 8,
-      fontSize: 12,
+      padding: "11px 14px",
+      borderRadius: 10,
+      fontSize: ty.sm,
       fontWeight: 500,
+      lineHeight: 1.5,
     },
     statusSuccess: {
       background: t.successBg,
@@ -382,56 +656,136 @@ function buildStyles(t) {
       border: `1px solid ${t.errBorder}`,
       color: t.errText,
     },
+
     listSection: {
-      marginTop: 22,
+      flex: 1,
+      minHeight: 0,
+      marginTop: 20,
+      paddingTop: 20,
       borderTop: `1px solid ${t.border}`,
-      paddingTop: 16,
+      display: "flex",
+      flexDirection: "column",
     },
     listHeader: {
       display: "flex",
       alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 10,
+      gap: 10,
+      marginBottom: 14,
+      flexShrink: 0,
     },
     listTitle: {
-      fontSize: 12,
+      fontSize: ty.xs,
       fontWeight: 700,
-      letterSpacing: "0.06em",
-      color: t.dim,
+      letterSpacing: "0.07em",
+      color: t.label,
       textTransform: "uppercase",
     },
-    listHint: { fontSize: 11, color: t.dim },
-    emptyDocs: { fontSize: 12, color: t.dim, margin: 0 },
+    listBadge: {
+      fontSize: ty.xs,
+      fontWeight: 700,
+      padding: "2px 9px",
+      borderRadius: 999,
+      background: t.chipActive,
+      color: t.text,
+    },
+    emptyBlock: {
+      padding: "24px 16px",
+      textAlign: "center",
+      borderRadius: 12,
+      border: `1px dashed ${t.borderMuted}`,
+      background: t.inputBg,
+    },
+    emptyIconWrap: {
+      width: 44,
+      height: 44,
+      borderRadius: 10,
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 12,
+    },
+    emptyTitle: {
+      fontSize: ty.sm,
+      fontWeight: 600,
+      color: t.text,
+      margin: "0 0 6px",
+    },
+    emptyDocs: {
+      fontSize: ty.sm,
+      color: t.body,
+      margin: 0,
+      lineHeight: 1.55,
+    },
     docList: {
       listStyle: "none",
       margin: 0,
       padding: 0,
       display: "flex",
       flexDirection: "column",
-      gap: 6,
-      maxHeight: 280,
+      gap: 8,
       overflowY: "auto",
+      flex: 1,
+      minHeight: 0,
+      paddingRight: 4,
     },
     docRow: {
       display: "flex",
       alignItems: "flex-start",
-      gap: 10,
-      padding: "10px 12px",
-      background: t.inputBg,
-      borderRadius: 10,
+      gap: 12,
+      padding: "12px 14px",
+      background: t.card,
+      borderRadius: 12,
       border: `1px solid ${t.border}`,
     },
-    docIcon: { fontSize: 16, lineHeight: 1, flexShrink: 0 },
-    docMeta: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 },
-    docName: {
-      fontSize: 12,
-      fontWeight: 600,
-      color: t.muted,
-      wordBreak: "break-word",
+    docIconWrap: {
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
     },
-    docDate: {
+    docMeta: {
+      flex: 1,
+      minWidth: 0,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+    },
+    docName: {
+      fontSize: ty.sm,
+      fontWeight: 600,
+      color: t.text,
+      lineHeight: 1.4,
+      wordBreak: "break-word",
+      display: "-webkit-box",
+      WebkitLineClamp: 2,
+      WebkitBoxOrient: "vertical",
+      overflow: "hidden",
+    },
+    docFooter: {
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 8,
+    },
+    typePill: {
       fontSize: 10,
-      color: t.dim,
+      fontWeight: 700,
+      letterSpacing: "0.06em",
+      padding: "3px 8px",
+      borderRadius: 6,
+    },
+    pill_pdf: { background: `${t.accent}22`, color: t.accent },
+    pill_image: { background: "rgba(52, 211, 153, 0.15)", color: "#34d399" },
+    pill_audio: { background: "rgba(251, 191, 36, 0.15)", color: "#fbbf24" },
+    pill_video: { background: "rgba(96, 165, 250, 0.15)", color: "#60a5fa" },
+    pill_file: { background: t.chipActive, color: t.muted },
+    docDate: {
+      fontSize: ty.xs,
+      color: t.muted,
+      fontWeight: 500,
     },
   };
 }
