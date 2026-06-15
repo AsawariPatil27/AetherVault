@@ -9,153 +9,103 @@ import Chat from "../models/Chat.js";
 export const uploadHandler = async (req, res) => {
   try {
     const files = req.files;
-
-    if (!files || files.length === 0) {
+    if (!files || files.length === 0)
       return res.status(400).json({ error: "No files uploaded" });
-    }
 
     const userId = req.user.id;
+    const rawChatId = typeof req.body?.chatId === "string" ? req.body.chatId.trim() : "";
 
-    const rawChatId =
-      typeof req.body?.chatId === "string" ? req.body.chatId.trim() : "";
-
-    if (!rawChatId) {
-      return res.status(400).json({ error: "chatId is required" });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(rawChatId)) {
+    if (!rawChatId) return res.status(400).json({ error: "chatId is required" });
+    if (!mongoose.Types.ObjectId.isValid(rawChatId))
       return res.status(400).json({ error: "Invalid chatId" });
-    }
 
     const chat = await Chat.findById(rawChatId);
-
-    if (!chat) {
-      return res.status(404).json({ error: "Chat not found" });
-    }
-
-    if (chat.userId !== userId) {
-      return res.status(403).json({ error: "Chat does not belong to this user" });
-    }
+    if (!chat) return res.status(404).json({ error: "Chat not found" });
+    if (chat.userId !== userId) return res.status(403).json({ error: "Chat does not belong to this user" });
 
     const chatId = chat._id;
 
+    // Save all Document records first
     const savedDocs = [];
-
     for (const file of files) {
       let type = "unknown";
-
       if (file.mimetype === "application/pdf") type = "pdf";
       else if (file.mimetype.startsWith("image/")) type = "image";
       else if (file.mimetype.startsWith("audio/")) type = "audio";
       else if (file.mimetype.startsWith("video/")) type = "video";
 
       const fileKey = file.key || file.location;
+      if (!fileKey) return res.status(500).json({ error: "File upload failed (no key)" });
 
-      if (!fileKey) {
-        return res.status(500).json({ error: "File upload failed (no key)" });
-      }
-
-      const doc = await Document.create({
-        userId,
-        chatId,
-        fileName: file.originalname,
-        fileKey,
-        fileType: type,
-      });
-
-      savedDocs.push(doc);
-
-      // 🚀 BACKGROUND PIPELINE
-      setImmediate(async () => {
-        try {
-          console.log(`🔄 Processing: ${doc.fileName}`);
-
-          // ✅ STEP 1: PARSE
-          const text = await parseFile(doc.fileKey, doc.fileType);
-
-          console.log("📄 RAW TEXT:", text);
-          console.log("📏 TEXT LENGTH:", text?.length);
-
-          if (!text || text.trim().length === 0) {
-            console.warn(`⚠️ No text extracted: ${doc.fileName}`);
-            return;
-          }
-
-          // ✅ STEP 2: CHUNK
-          const chunks = await chunkText(text);
-
-          console.log("✂️ CHUNKS:", chunks);
-          console.log("🔢 CHUNK COUNT:", chunks.length);
-
-          // ✅ FALLBACK (VERY IMPORTANT)
-          if (!chunks.length) {
-            console.warn(`⚠️ Using fallback chunk for: ${doc.fileName}`);
-
-            let embedding = [];
-            try {
-              const vectors = await embedChunks([text]);
-              embedding = vectors[0] || [];
-            } catch (embedErr) {
-              console.error("❌ Embedding failed (fallback chunk):", embedErr);
-            }
-
-            await Chunk.create({
-              userId,
-              chatId,
-              documentId: doc._id,
-              text: text,
-              embedding,
-              metadata: {
-                chunkIndex: 0,
-                sourceType: doc.fileType,
-                fileKey: doc.fileKey,
-                fileName: doc.fileName,
-              },
-            });
-
-            return;
-          }
-
-          // ✅ STEP 3: EMBED
-          let embeddings = [];
-          try {
-            embeddings = await embedChunks(chunks);
-          } catch (embedErr) {
-            console.error("❌ Embedding failed:", embedErr);
-            embeddings = chunks.map(() => []);
-          }
-
-          // ✅ STEP 4: STORE
-          const chunkDocs = chunks.map((chunk, index) => ({
-            userId,
-            chatId,
-            documentId: doc._id,
-            text: chunk,
-            embedding: embeddings[index] || [],
-            metadata: {
-              chunkIndex: index,
-              sourceType: doc.fileType,
-              fileKey: doc.fileKey,
-              fileName: doc.fileName,
-            },
-          }));
-
-          await Chunk.insertMany(chunkDocs);
-
-          console.log(`✅ Done: ${doc.fileName} | Chunks: ${chunks.length}`);
-        } catch (err) {
-          console.error("❌ Pipeline error:", err);
-        }
-      });
+      const doc = await Document.create({ userId, chatId, fileName: file.originalname, fileKey, fileType: type });
+      savedDocs.push({ doc, type });
     }
 
-    res.json({
-      message: "Upload successful, processing started 🚀",
-      chatId: chatId.toString(),
-      documents: savedDocs,
-    });
+    // Switch to SSE for pipeline progress
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    const sse = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    sse({ event: "saved", documents: savedDocs.map(({ doc }) => ({ _id: doc._id, fileName: doc.fileName, fileType: doc.fileType, createdAt: doc.createdAt })) });
+
+    // Process each file sequentially with live updates
+    for (const { doc, type } of savedDocs) {
+      const name = doc.fileName;
+
+      try {
+        // Step 1: Parse
+        sse({ event: "step", file: name, step: "parsing", message: `Parsing ${name}…` });
+        const text = await parseFile(doc.fileKey, type);
+
+        if (!text || text.trim().length === 0) {
+          sse({ event: "step", file: name, step: "warning", message: `No text extracted from ${name}` });
+          sse({ event: "file_done", file: name, chunks: 0 });
+          continue;
+        }
+
+        // Step 2: Chunk
+        sse({ event: "step", file: name, step: "chunking", message: `Splitting ${name} into chunks…` });
+        let chunks = await chunkText(text, type);
+
+        // Fallback: if no chunks, use full text as one chunk
+        if (!chunks.length) chunks = [text];
+
+        // Step 3: Embed
+        sse({ event: "step", file: name, step: "embedding", message: `Embedding ${chunks.length} chunk${chunks.length !== 1 ? "s" : ""}…` });
+        let embeddings = [];
+        try {
+          embeddings = await embedChunks(chunks);
+        } catch {
+          embeddings = chunks.map(() => []);
+        }
+
+        // Step 4: Store
+        sse({ event: "step", file: name, step: "storing", message: `Saving to database…` });
+        await Chunk.insertMany(chunks.map((chunk, index) => ({
+          userId, chatId,
+          documentId: doc._id,
+          text: chunk,
+          embedding: embeddings[index] || [],
+          metadata: { chunkIndex: index, sourceType: type, fileKey: doc.fileKey, fileName: name },
+        })));
+
+        sse({ event: "file_done", file: name, chunks: chunks.length });
+      } catch (err) {
+        console.error(`❌ Pipeline error for ${name}:`, err);
+        sse({ event: "file_error", file: name, message: err.message });
+      }
+    }
+
+    sse({ event: "done" });
+    res.end();
   } catch (error) {
     console.error("UPLOAD ERROR:", error);
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ event: "error", message: error.message })}\n\n`);
+      return res.end();
+    }
     res.status(500).json({ error: "Upload failed" });
   }
 };

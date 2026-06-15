@@ -1,7 +1,10 @@
 import mongoose from "mongoose";
 import Chat from "../models/Chat.js";
 import { hybridSearch } from "../services/searchService.js";
-import { streamAnswer, generateDiagram } from "../services/ai/groqService.js";
+import { streamAnswer, generateDiagram, generateTitle } from "../services/ai/groqService.js";
+import { getHistory, saveHistory } from "../services/historyService.js";
+
+const MIN_SCORE = 0.005; // filter out weakly-related chunks
 
 const buildSources = (chunks) =>
   chunks.map((c) => ({
@@ -26,58 +29,82 @@ export const askQuestion = async (req, res) => {
     const chat = await Chat.findOne({ _id: chatId, userId });
     if (!chat) return res.status(404).json({ error: "Chat not found" });
 
-    console.log(`[ask] retrieval start — query: "${query}"`);
-    const chunks = await hybridSearch(query, userId, { chatId });
-    console.log(`[ask] retrieval done — ${chunks.length} chunks`);
-
-    // Image mode — regular JSON response (Mermaid needs full code, no streaming)
+    // Image mode — regular JSON, no SSE needed
     if (mode === "image") {
-      if (!chunks.length) {
+      const [history, chunks] = await Promise.all([
+        getHistory(chatId),
+        hybridSearch(query, userId, { chatId }),
+      ]);
+      const relevant = chunks.filter((c) => c.hybridScore >= MIN_SCORE);
+
+      if (!relevant.length) {
         return res.json({
           mode: "image",
-          answer: "I couldn't find any relevant content in your uploaded documents for that question.",
+          answer: "I couldn't find relevant content in your documents for that question.",
           sources: [],
         });
       }
 
-      const sourcesPayload = buildSources(chunks);
-      console.log("[ask] generating Mermaid diagram...");
-      const diagram = await generateDiagram(query, chunks);
-
+      const diagram = await generateDiagram(query, relevant, history);
       if (diagram === "NO_RELEVANT_CONTENT") {
         return res.json({
           mode: "image",
-          answer: "I couldn't find relevant content in your documents to generate a diagram for that question.",
+          answer: "I couldn't find relevant content in your documents to generate a diagram.",
           sources: [],
         });
       }
 
-      console.log("[ask] diagram ready");
-      return res.json({ mode: "image", diagram, sources: sourcesPayload });
+      const sources = buildSources(relevant);
+      saveHistory(chatId, userId, query, diagram, sources, "image");
+
+      let newTitle = null;
+      if (history.length === 0) {
+        newTitle = await generateTitle(query).catch(() => null);
+        if (newTitle) await Chat.findByIdAndUpdate(chatId, { title: newTitle }).catch(() => {});
+      }
+
+      return res.json({ mode: "image", diagram, sources, ...(newTitle && { title: newTitle }) });
     }
 
     // Text / Audio — SSE streaming
-    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    const sseEnd = (payload) => {
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
-      res.end();
-    };
+    const sse = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    const sseEnd = (payload) => { sse(payload); res.end(); };
 
-    if (!chunks.length) {
-      res.write(`data: ${JSON.stringify({ token: "I couldn't find any relevant content in your uploaded documents for that question." })}\n\n`);
+    // Step 1: searching
+    sse({ status: "searching" });
+
+    const [history, chunks] = await Promise.all([
+      getHistory(chatId),
+      hybridSearch(query, userId, { chatId }),
+    ]);
+
+    const relevant = chunks.filter((c) => c.hybridScore >= MIN_SCORE);
+
+    if (!relevant.length) {
+      sse({ token: "I couldn't find any relevant content in your uploaded documents for that question." });
       return sseEnd({ done: true, sources: [] });
     }
 
-    const sourcesPayload = buildSources(chunks);
+    const sourcesPayload = buildSources(relevant);
+
+    // Step 2: generating
+    sse({ status: "generating" });
 
     try {
-      console.log("[ask] streaming Groq...");
-      await streamAnswer(query, chunks, res);
-      console.log("[ask] stream complete");
-      return sseEnd({ done: true, sources: sourcesPayload });
+      const fullAnswer = await streamAnswer(query, relevant, history, res);
+      saveHistory(chatId, userId, query, fullAnswer, sourcesPayload);
+
+      let newTitle = null;
+      if (history.length === 0) {
+        newTitle = await generateTitle(query).catch(() => null);
+        if (newTitle) await Chat.findByIdAndUpdate(chatId, { title: newTitle }).catch(() => {});
+      }
+
+      return sseEnd({ done: true, sources: sourcesPayload, ...(newTitle && { title: newTitle }) });
     } catch (streamErr) {
       console.error("[ask] stream error:", streamErr);
       return sseEnd({ error: streamErr.message || "Failed to generate answer" });

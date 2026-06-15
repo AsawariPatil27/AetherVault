@@ -11,7 +11,7 @@ export const parsePdf = async (fileUrl) => {
     );
     return data.text || "";
   } catch (error) {
-    console.error("Docling PDF parsing error:", error.message);
+    console.error("PDF parsing error:", error.message);
     return "";
   }
 };

@@ -57,6 +57,7 @@ export default function Dashboard() {
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [filesPanelOpen, setFilesPanelOpen] = useState(true);
   const [creating, setCreating] = useState(false);
   const [fetchingChats, setFetchingChats] = useState(false);
 
@@ -416,6 +417,28 @@ export default function Dashboard() {
 
           <div style={styles.topbarSpacer} />
 
+          {activeId && (
+            <button
+              type="button"
+              style={{
+                ...styles.themeToggle,
+                borderColor: t.border,
+                color: filesPanelOpen ? t.accent : t.muted,
+                background: t.card,
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+              }}
+              onClick={() => setFilesPanelOpen((p) => !p)}
+              title={filesPanelOpen ? "Hide files panel" : "Show files panel"}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <path d="M8 4h13M8 12h13M8 20h13M3 4h.01M3 12h.01M3 20h.01" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+              Files
+            </button>
+          )}
+
           <button
             type="button"
             style={{
@@ -434,21 +457,34 @@ export default function Dashboard() {
           {activeId ? (
             <div style={styles.workspaceRow}>
               <div style={styles.centerCol}>
-                <ChatQueryPanel key={activeId} chatId={activeId} t={t} />
+                <ChatQueryPanel
+                  key={activeId}
+                  chatId={activeId}
+                  t={t}
+                  onTitleUpdate={(id, title) =>
+                    setChats((prev) => prev.map((c) => normalizeChatId(c._id) === id ? { ...c, title } : c))
+                  }
+                />
               </div>
               <div
                 style={{
                   ...styles.rightCol,
                   borderColor: t.border,
                   background: t.sidebarBg,
+                  width: filesPanelOpen ? 360 : 0,
+                  paddingLeft: filesPanelOpen ? 32 : 0,
+                  overflow: "hidden",
+                  transition: "width 0.25s ease, padding 0.25s ease",
                 }}
               >
-                <ChatFilesPanel
-                  key={activeId}
-                  chatId={activeId}
-                  t={t}
-                  onUploadDone={fetchChats}
-                />
+                {filesPanelOpen && (
+                  <ChatFilesPanel
+                    key={activeId}
+                    chatId={activeId}
+                    t={t}
+                    onUploadDone={fetchChats}
+                  />
+                )}
               </div>
             </div>
           ) : (

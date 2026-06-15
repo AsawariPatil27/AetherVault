@@ -24,16 +24,16 @@ const messageSchema = new mongoose.Schema({
   },
 
   metadata: {
-
+    mode: { type: String, default: "text" },
     sources: [
       {
         documentId: mongoose.Schema.Types.ObjectId,
         chunkId: mongoose.Schema.Types.ObjectId,
         fileName: String,
         fileType: String,
-        fileKey: String   // 🔥 IMPORTANT (S3 reference)
+        fileKey: String,
       }
-    ]
+    ],
   },
 
   createdAt: {
