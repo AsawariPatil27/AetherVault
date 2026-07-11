@@ -4,9 +4,7 @@ Talk to your documents. AetherVault is a RAG-powered document intelligence platf
 
 ---
 
-## Screenshots
 
-> To add screenshots: take them while the app is running, save them in a `screenshots/` folder in the project root, then commit and push. They will appear here automatically on GitHub.
 
 **Landing page**
 ![Landing page](screenshots/landing.png)
