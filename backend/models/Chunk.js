@@ -28,6 +28,11 @@ const chunkSchema = new mongoose.Schema({
     required: true
   },
 
+  clipEmbedding: {
+    type: [Number],   // CLIP vector (512 dimensions)
+    required: false
+  },
+
   metadata: {
     chunkIndex: Number,
     sourceType: {

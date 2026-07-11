@@ -1,4 +1,4 @@
-﻿"""
+"""
 Persistent server for embeddings (BAAI/bge-base-en) and PDF parsing.
 Parsing strategy: PyMuPDF fast path -> Docling fallback for image-heavy PDFs.
 Start: python embedding_server.py
@@ -8,11 +8,15 @@ Port is controlled by EMBEDDING_PORT env var (default 5002).
 """
 import os
 import sys
+from io import BytesIO
+import requests
+from PIL import Image
 from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer
 
 app = Flask(__name__)
 _model = None
+_clip_model = None
 _BATCH_SIZE = 32
 
 # Chars-per-page threshold; below this -> image-heavy PDF -> use Docling
@@ -26,6 +30,15 @@ def get_model():
         _model = SentenceTransformer("BAAI/bge-base-en")
         print("Model ready.", file=sys.stderr, flush=True)
     return _model
+
+
+def get_clip_model():
+    global _clip_model
+    if _clip_model is None:
+        print("Loading clip-ViT-B-32...", file=sys.stderr, flush=True)
+        _clip_model = SentenceTransformer("clip-ViT-B-32")
+        print("CLIP model ready.", file=sys.stderr, flush=True)
+    return _clip_model
 
 
 def sanitize(value) -> str:
@@ -82,6 +95,43 @@ def embed():
         embeddings.extend(model.encode(batch, show_progress_bar=False).tolist())
 
     return jsonify({"embeddings": embeddings})
+
+
+@app.route("/embed-image", methods=["POST"])
+def embed_image():
+    url = request.get_json(force=True).get("url", "")
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content))
+
+        clip_model = get_clip_model()
+        embedding = clip_model.encode(img, show_progress_bar=False).tolist()
+        return jsonify({"embedding": embedding})
+    except Exception as e:
+        print(f"[embed-image] Error: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/embed-clip-text", methods=["POST"])
+def embed_clip_text():
+    texts = request.get_json(force=True).get("texts", [])
+    if not isinstance(texts, list):
+        return jsonify({"error": "texts must be a list"}), 400
+
+    try:
+        clip_model = get_clip_model()
+        embeddings = []
+        for i in range(0, len(texts), _BATCH_SIZE):
+            batch = texts[i : i + _BATCH_SIZE]
+            embeddings.extend(clip_model.encode(batch, show_progress_bar=False).tolist())
+        return jsonify({"embeddings": embeddings})
+    except Exception as e:
+        print(f"[embed-clip-text] Error: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/parse-pdf", methods=["POST"])

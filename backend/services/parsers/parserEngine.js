@@ -1,6 +1,5 @@
 import { getSignedFileUrl } from "../../utils/s3SignedUrl.js";
 import { parsePdf } from "./pdfParser.js";
-import { parseImage } from "./imageParser.js";
 import { parseAudio } from "./audioParser.js";
 import { parseVideo } from "./videoParser.js";
 
@@ -12,10 +11,6 @@ export const parseFile = async (fileKey, fileType) => {
     return await parsePdf(signedUrl);
   }
 
-  if (fileType === "image") {
-    return await parseImage(signedUrl);
-  }
-
   if (fileType === "audio") {
     return await parseAudio(signedUrl);
   }
@@ -24,5 +19,6 @@ export const parseFile = async (fileKey, fileType) => {
     return await parseVideo(signedUrl);
   }
 
+  // "image" is handled by the CLIP fast-path in uploadController — never reaches here.
   return "";
 };

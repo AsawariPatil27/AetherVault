@@ -1,5 +1,5 @@
 import Chunk from "../models/Chunk.js";
-import { embedChunks } from "./etl/embeddingService.js";
+import { embedChunks, embedClipText } from "./etl/embeddingService.js";
 import { getSignedFileUrl } from "../utils/s3SignedUrl.js";
 import mongoose from "mongoose";
 
@@ -27,23 +27,22 @@ function buildSearchFilter(userId, chatId, sourceType) {
 }
 
 // 🔹 RRF Fusion
-function reciprocalRankFusion(vectorHits, textHits, limit) {
+function reciprocalRankFusion(vectorHits, textHits, clipHits = [], limit) {
   const scores = new Map();
   const docs = new Map();
 
-  vectorHits.forEach((doc, rank) => {
-    const id = String(doc._id);
-    const existing = docs.get(id);
-    docs.set(id, existing ? { ...existing, ...doc } : doc);
-    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
-  });
+  const processHits = (hits) => {
+    hits.forEach((doc, rank) => {
+      const id = String(doc._id);
+      const existing = docs.get(id);
+      docs.set(id, existing ? { ...existing, ...doc } : doc);
+      scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
+    });
+  };
 
-  textHits.forEach((doc, rank) => {
-    const id = String(doc._id);
-    const existing = docs.get(id);
-    docs.set(id, existing ? { ...existing, ...doc } : doc);
-    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
-  });
+  processHits(vectorHits);
+  processHits(textHits);
+  processHits(clipHits);
 
   return [...scores.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -79,6 +78,35 @@ async function runVectorSearch(queryVector, userId, chatId, sourceType, limit) {
     {
       $project: {
         embedding: 0,
+        vectorScore: { $meta: "vectorSearchScore" },
+      },
+    },
+  ]);
+}
+
+// 🔹 CLIP VECTOR SEARCH
+async function runClipVectorSearch(queryVector, userId, chatId, limit) {
+  const numCandidates = Math.min(Math.max(limit * 20, 150), 2000);
+
+  return Chunk.aggregate([
+    {
+      $vectorSearch: {
+        index: "chunks_clip",
+        path: "clipEmbedding",
+        queryVector,
+        numCandidates,
+        limit,
+        filter: {
+          userId: userId,
+          chatId: new mongoose.Types.ObjectId(chatId),
+          "metadata.sourceType": "image",
+        },
+      },
+    },
+    {
+      $project: {
+        embedding: 0,
+        clipEmbedding: 0,
         vectorScore: { $meta: "vectorSearchScore" },
       },
     },
@@ -186,8 +214,25 @@ export async function hybridSearch(query, userId, options = {}) {
     console.warn("Embedding failed, falling back to text-only search:", err.message);
   }
 
-  const [vectorResults, textResults] = await Promise.all([vectorResultsPromise, textResultsPromise]);
+  // Embed the query for CLIP if we want images
+  let clipResultsPromise = Promise.resolve([]);
+  if (!sourceType || sourceType === "image") {
+    try {
+      const clipTextVector = await embedClipText(raw);
+      if (clipTextVector?.length) {
+        clipResultsPromise = runClipVectorSearch(clipTextVector, userId, rawChatId, limit * 2);
+      }
+    } catch (err) {
+      console.warn("CLIP text embedding failed, ignoring CLIP search:", err.message);
+    }
+  }
 
-  const merged = reciprocalRankFusion(vectorResults, textResults, limit);
+  const [vectorResults, textResults, clipResults] = await Promise.all([
+    vectorResultsPromise,
+    textResultsPromise,
+    clipResultsPromise,
+  ]);
+
+  const merged = reciprocalRankFusion(vectorResults, textResults, clipResults, limit);
   return attachMediaUrls(merged);
 }

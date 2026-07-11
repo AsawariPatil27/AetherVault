@@ -149,7 +149,21 @@ function SourcesToggle({ answer, sources, t }) {
                   padding: "1px 7px", borderRadius: 5, fontWeight: 700, textTransform: "uppercase",
                 }}>{s.sourceType}</span>}
               </div>
-              {s.text ? (
+              {s.sourceType === "image" && s.mediaUrl ? (
+                <div style={{ marginTop: 8 }}>
+                  <img
+                    src={s.mediaUrl}
+                    alt={s.fileName || "Source Image"}
+                    style={{
+                      maxWidth: "100%",
+                      maxHeight: 250,
+                      borderRadius: 8,
+                      objectFit: "contain",
+                      border: `1px solid ${t.border}`,
+                    }}
+                  />
+                </div>
+              ) : s.text ? (
                 <p style={{ fontSize: ty.sm, color: t.body, margin: 0, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
                   {s.text.length > 220 ? s.text.slice(0, 220) + "…" : s.text}
                 </p>

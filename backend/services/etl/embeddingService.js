@@ -18,3 +18,23 @@ export const embedChunks = async (chunks) => {
 
   return embeddings;
 };
+
+export const embedImage = async (imageUrl) => {
+  if (!imageUrl) return null;
+  const { data } = await axios.post(
+    `${EMBEDDING_URL}/embed-image`,
+    { url: imageUrl },
+    { timeout: 35_000 }
+  );
+  return data.embedding;
+};
+
+export const embedClipText = async (text) => {
+  if (!text) return [];
+  const { data } = await axios.post(
+    `${EMBEDDING_URL}/embed-clip-text`,
+    { texts: [text] },
+    { timeout: 10_000 }
+  );
+  return data.embeddings?.[0] || [];
+};

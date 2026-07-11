@@ -6,14 +6,48 @@ const client = new OpenAI({
   timeout: 30_000,
 });
 
-function buildContext(chunks) {
-  return chunks
-    .map((c, i) => {
-      const source = c.metadata?.fileName || "document";
-      const type = c.metadata?.sourceType || "";
-      return `[${i + 1}] ${source}${type ? ` (${type})` : ""}\n${c.text.trim()}`;
-    })
-    .join("\n\n---\n\n");
+const VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+
+function buildUserMessage(query, chunks) {
+  const hasImages = chunks.some((c) => c.metadata?.sourceType === "image" && c.mediaUrl);
+
+  if (!hasImages) {
+    // Text-only path — same as before
+    const context = chunks
+      .map((c, i) => {
+        const source = c.metadata?.fileName || "document";
+        const type = c.metadata?.sourceType || "";
+        return `[${i + 1}] ${source}${type ? ` (${type})` : ""}\n${c.text.trim()}`;
+      })
+      .join("\n\n---\n\n");
+
+    return {
+      role: "user",
+      content: `Document excerpts:\n\n${context}\n\nQuestion: ${query}`,
+    };
+  }
+
+  // Multimodal path — inline images + text excerpts as a content array
+  const contentParts = [];
+
+  contentParts.push({ type: "text", text: "Here are the relevant document excerpts and images:\n" });
+
+  chunks.forEach((c, i) => {
+    const source = c.metadata?.fileName || "document";
+    const type = c.metadata?.sourceType || "";
+    const label = `[${i + 1}] ${source}${type ? ` (${type})` : ""}`;
+
+    if (type === "image" && c.mediaUrl) {
+      contentParts.push({ type: "text", text: `${label}:` });
+      contentParts.push({ type: "image_url", image_url: { url: c.mediaUrl } });
+    } else {
+      contentParts.push({ type: "text", text: `${label}\n${c.text.trim()}` });
+    }
+  });
+
+  contentParts.push({ type: "text", text: `\nQuestion: ${query}` });
+
+  return { role: "user", content: contentParts };
 }
 
 function sanitizeDiagram(raw) {
@@ -44,7 +78,7 @@ export async function generateDiagram(query, chunks, history = []) {
   const context = chunks.map((c, i) => `[${i + 1}] ${c.text}`).join("\n\n---\n\n");
 
   const completion = await client.chat.completions.create({
-    model: "llama-3.1-8b-instant",
+    model: "llama-3.3-70b-versatile",
     messages: [
       {
         role: "system",
@@ -118,16 +152,21 @@ const ANSWER_PRIMARY  = "llama-3.3-70b-versatile";
 const ANSWER_FALLBACK = "llama-3.1-8b-instant";
 
 export async function streamAnswer(query, chunks, history = [], res) {
-  const context = buildContext(chunks);
+  const hasImages = chunks.some((c) => c.metadata?.sourceType === "image" && c.mediaUrl);
+  const userMessage = buildUserMessage(query, chunks);
+
+  // Use vision model when images are present; otherwise use the text primary/fallback pair
+  const primaryModel = hasImages ? VISION_MODEL : ANSWER_PRIMARY;
+  const fallbackModel = hasImages ? VISION_MODEL : ANSWER_FALLBACK;
 
   const messages = [
     {
       role: "system",
       content:
-        "You are AetherVault, an expert document assistant. Your job is to give accurate, detailed, well-structured answers based strictly on the provided document excerpts.\n\n" +
+        "You are AetherVault, an expert document assistant. Your job is to give accurate, detailed, well-structured answers based strictly on the provided document excerpts and images.\n\n" +
         "RULES:\n" +
         "- For greetings or small talk, respond warmly and briefly — no citations needed.\n" +
-        "- For all other questions, answer ONLY using the provided excerpts.\n" +
+        "- For all other questions, answer ONLY using the provided excerpts and images.\n" +
         "- Be comprehensive and detailed — never truncate an explanation if the source material has more information.\n" +
         "- Cite EVERY fact inline using [1], [2], etc. — every claim needs a citation.\n" +
         "- Use markdown formatting: **bold** for key terms, bullet points for lists, numbered steps for processes.\n" +
@@ -135,16 +174,13 @@ export async function streamAnswer(query, chunks, history = [], res) {
         "- Never guess or hallucinate — if the answer is genuinely not in the excerpts, say so directly.",
     },
     ...history,
-    {
-      role: "user",
-      content: `Document excerpts:\n\n${context}\n\nQuestion: ${query}`,
-    },
+    userMessage,
   ];
 
   let stream;
   try {
     stream = await client.chat.completions.create({
-      model: ANSWER_PRIMARY,
+      model: primaryModel,
       messages,
       temperature: 0.15,
       max_tokens: 2048,
@@ -152,9 +188,9 @@ export async function streamAnswer(query, chunks, history = [], res) {
     });
   } catch (err) {
     if (err.status === 429) {
-      console.warn("[groq] primary model rate-limited, falling back to", ANSWER_FALLBACK);
+      console.warn("[groq] primary model rate-limited, falling back to", fallbackModel);
       stream = await client.chat.completions.create({
-        model: ANSWER_FALLBACK,
+        model: fallbackModel,
         messages,
         temperature: 0.15,
         max_tokens: 2048,

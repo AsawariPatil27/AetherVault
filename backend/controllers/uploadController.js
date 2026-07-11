@@ -2,9 +2,10 @@ import Document from "../models/Document.js";
 import mongoose from "mongoose";
 import { parseFile } from "../services/parsers/parserEngine.js";
 import { chunkText } from "../services/etl/chunker.js";
-import { embedChunks } from "../services/etl/embeddingService.js";
+import { embedChunks, embedImage } from "../services/etl/embeddingService.js";
 import Chunk from "../models/Chunk.js";
 import Chat from "../models/Chat.js";
+import { getSignedFileUrl } from "../utils/s3SignedUrl.js";
 
 export const uploadHandler = async (req, res) => {
   try {
@@ -55,6 +56,35 @@ export const uploadHandler = async (req, res) => {
       const name = doc.fileName;
 
       try {
+        // ── IMAGE FAST PATH ──────────────────────────────────────────────────
+        // Images skip parse / chunk / BAAI-embed entirely.
+        // CLIP embeds the raw pixels; the vision LLM reads the image at query time.
+        if (type === "image") {
+          sse({ event: "step", file: name, step: "embedding", message: `Generating CLIP embedding for ${name}…` });
+
+          let clipEmbedding;
+          try {
+            const signedUrl = await getSignedFileUrl(doc.fileKey);
+            clipEmbedding = await embedImage(signedUrl);
+          } catch (err) {
+            console.warn(`[upload] CLIP embedding failed for ${name}:`, err.message);
+          }
+
+          sse({ event: "step", file: name, step: "storing", message: `Saving to database…` });
+          await Chunk.create({
+            userId, chatId,
+            documentId: doc._id,
+            text: `[image: ${name}]`,
+            embedding: [],
+            clipEmbedding,
+            metadata: { chunkIndex: 0, sourceType: "image", fileKey: doc.fileKey, fileName: name },
+          });
+
+          sse({ event: "file_done", file: name, chunks: 1 });
+          continue;
+        }
+
+        // ── TEXT / AUDIO / VIDEO PATH ────────────────────────────────────────
         // Step 1: Parse
         sse({ event: "step", file: name, step: "parsing", message: `Parsing ${name}…` });
         const text = await parseFile(doc.fileKey, type);
@@ -68,8 +98,6 @@ export const uploadHandler = async (req, res) => {
         // Step 2: Chunk
         sse({ event: "step", file: name, step: "chunking", message: `Splitting ${name} into chunks…` });
         let chunks = await chunkText(text, type);
-
-        // Fallback: if no chunks, use full text as one chunk
         if (!chunks.length) chunks = [text];
 
         // Step 3: Embed
