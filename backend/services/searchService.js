@@ -81,6 +81,11 @@ async function runVectorSearch(queryVector, userId, chatId, sourceType, limit) {
         vectorScore: { $meta: "vectorSearchScore" },
       },
     },
+    {
+      $match: {
+        vectorScore: { $gte: 0.62 },
+      },
+    },
   ]);
 }
 
@@ -99,7 +104,6 @@ async function runClipVectorSearch(queryVector, userId, chatId, limit) {
         filter: {
           userId: userId,
           chatId: new mongoose.Types.ObjectId(chatId),
-          "metadata.sourceType": "image",
         },
       },
     },
@@ -108,6 +112,11 @@ async function runClipVectorSearch(queryVector, userId, chatId, limit) {
         embedding: 0,
         clipEmbedding: 0,
         vectorScore: { $meta: "vectorSearchScore" },
+      },
+    },
+    {
+      $match: {
+        vectorScore: { $gte: 0.18 },
       },
     },
   ]);

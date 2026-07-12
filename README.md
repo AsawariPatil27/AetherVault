@@ -227,21 +227,36 @@ VITE_API_URL=http://localhost:5000
 
 ### Running the app
 
-**1. Start the Python embedding server**
+**1. Start the Python embedding server (Port 5002)**
 ```bash
 cd backend
+# Using standard Python:
 pip install flask sentence-transformers pymupdf docling requests
-python embedding_server.py
+python -u embedding_server.py
+
+# Or using Conda:
+conda run -n whisper_env python -u embedding_server.py
 ```
 
-**2. Start the backend**
+**2. Start the Python Whisper server (Port 5003)**
+```bash
+cd backend
+# Using standard Python:
+pip install flask transformers torch requests
+python -u whisper_server.py
+
+# Or using Conda:
+conda run -n whisper_env python -u whisper_server.py
+```
+
+**3. Start the Node.js backend (Port 5000)**
 ```bash
 cd backend
 npm install
 npm run dev
 ```
 
-**3. Start the frontend**
+**4. Start the React frontend (Port 5173)**
 ```bash
 cd frontend
 npm install
